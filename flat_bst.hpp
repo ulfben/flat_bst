@@ -3,7 +3,7 @@
 // better cache locality, fewer allocations, and stable references.
 // Inspired by Jens Weller’s “Looking at binary trees in C++”:
 //	 https://meetingcpp.com/blog/items/Looking-at-binary-trees-in-Cpp.html
-// Live demo: https://compiler-explorer.com/z/1ffT3Y8xd
+// Live demo: https://compiler-explorer.com/z/rqEKxGsTT
 // Requires C++26. See main.cpp for usage examples.
 // Ulf Benjaminsson, 2025
 #pragma once

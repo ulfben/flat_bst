@@ -4,7 +4,7 @@
 
 This design was inspired by Jens Weller’s article "[Looking at binary trees in C++](https://meetingcpp.com/blog/items/Looking-at-binary-trees-in-Cpp.html)" where he briefly explores possible designs and points out the potential of using flat storage with indices rather than heap-allocated pointers.
 
-[Try it live on Compiler Explorer](https://compiler-explorer.com/z/oGcqMh99M) or see main.cpp for tests and useage.
+[Try it live on Compiler Explorer](https://compiler-explorer.com/z/rqEKxGsTT) or see main.cpp for tests and useage.
 
 ## Why flat storage
 
