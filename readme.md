@@ -2,9 +2,9 @@
 
 `flat::bst<T, Compare, IndexT>` is a header-only binary search tree that stores nodes in a flat container and links them with integer indices instead of pointers. It aims to be a pragmatic, cache-friendly alternative to pointer-based node trees for unique keys and read-heavy workloads.
 
-This design was inspired by Jens Weller’s article "[Looking at binary trees in C++](https://meetingcpp.com/blog/items/Looking-at-binary-trees-in-Cpp.html)" where he briefly explores possible designs and points out the potential of using flat storage with indices rather than heap-allocated pointers.
+This design was inspired by Jens Wellerâ€™s article "[Looking at binary trees in C++](https://meetingcpp.com/blog/items/Looking-at-binary-trees-in-Cpp.html)" where he briefly explores possible designs and points out the potential of using flat storage with indices rather than heap-allocated pointers.
 
-[Try it live on Compiler Explorer](https://compiler-explorer.com/z/1ffT3Y8xd) or see main.cpp for tests and useage.
+[Try it live on Compiler Explorer](https://compiler-explorer.com/z/oGcqMh99M) or see main.cpp for tests and useage.
 
 ## Why flat storage
 
