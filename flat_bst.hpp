@@ -33,7 +33,7 @@ namespace flat::detail {
 		using tree_t = bst<T, Compare, IndexT>;
 		using index_type = IndexT;
 		static constexpr index_type npos = tree_t::npos;
-
+		static constexpr size_t traversal_stack_reserve = 16;
 		const tree_t* tree_ = nullptr;
 		std::vector<index_type> stack_;
 		index_type cur_ = npos;
@@ -55,7 +55,7 @@ namespace flat::detail {
 		constexpr inorder_iter() = default;
 		explicit constexpr inorder_iter(const tree_t* t, bool end) : tree_(t){
 			if(!t || end || !tree_t::is_valid(t->root_index())){ cur_ = npos; return; }
-			stack_.reserve(16);
+			stack_.reserve(traversal_stack_reserve);
 			push_left_(t->root_index());
 			cur_ = stack_.back();
 			stack_.pop_back();
@@ -96,7 +96,7 @@ namespace flat::detail {
 } // namespace flat::detail
 
 namespace flat{
-	
+
 	template<class T, class Compare, class IndexT>
 	class bst final{
 	public:
@@ -110,7 +110,9 @@ namespace flat{
 
 		bst() = default;
 
-		constexpr explicit bst(Compare cmp) noexcept : comp_(std::move(cmp)){}
+		constexpr explicit bst(Compare cmp) 
+			noexcept(std::is_nothrow_move_constructible_v<Compare>) 
+			: comp_(std::move(cmp)){}
 
 		// if you already have sorted-unique data, create an empty bst and call build_from_sorted_unique instead
 		// this ctor just does the right thing for arbitrary ranges.
@@ -153,11 +155,20 @@ namespace flat{
 		constexpr void reserve(size_type n){ nodes_.reserve(n); }
 		constexpr void rebuild_compact(){ rebalance(); }
 
-		constexpr void clear(){
+		constexpr void clear() noexcept{
 			nodes_.clear();
 			free_.clear();
 			root_ = npos;
 			alive_ = 0;
+		}
+
+		void swap(bst& other) noexcept(noexcept(std::swap(comp_, other.comp_))){
+			using std::swap;
+			swap(root_, other.root_);
+			swap(alive_, other.alive_);
+			swap(nodes_, other.nodes_);
+			swap(free_, other.free_);
+			swap(comp_, other.comp_);
 		}
 
 		// insert / emplace, returns {index, inserted}
@@ -191,21 +202,9 @@ namespace flat{
 		template<class It>
 		void build_from_sorted_unique(It first, It last){
 			assert(std::is_sorted(first, last, comp_) && "Input range must be sorted according to Compare");
-			clear();
-			const size_type n = static_cast<size_type>(std::distance(first, last));
-			if(n == 0) return;
-			nodes_.reserve(n);
-			// recursive builder returns index of subtree root
-			auto build = [&](auto&& self, It lo, It hi) -> index_type{
-				if(lo == hi) return npos;
-				It mid = lo + (std::distance(lo, hi) / 2);
-				index_type me = make_node(*mid); // create node for *mid
-				node& m = get(me);
-				m.left = self(self, lo, mid); // left subtree				
-				m.right = self(self, std::next(mid), hi); // right subtree
-				return me;
-				};
-			root_ = build(build, first, last);
+			bst tmp(comp_);
+			tmp.build_from_sorted_unique_into_empty(first, last);
+			swap(tmp);
 		}
 
 		// build balanced tree from arbitrary input range (sorts + uniques)
@@ -257,7 +256,7 @@ namespace flat{
 
 
 		// erase by key - returns true if erased
-		constexpr bool erase(const value_type& key) noexcept{
+		constexpr bool erase(const value_type& key){
 			auto [parent, cur] = find_with_parent(key);
 			if(cur == npos){
 				return false;
@@ -270,7 +269,7 @@ namespace flat{
 		template<class F>
 		constexpr void inorder(F&& f) const{
 			std::vector<index_type> stack;
-			stack.reserve(64);
+			stack.reserve(traversal_stack_reserve);
 			index_type index = root_;
 			while(is_valid(index) || !stack.empty()){
 				while(is_valid(index)){
@@ -288,7 +287,7 @@ namespace flat{
 		constexpr void preorder(F&& f) const{
 			if(!is_valid(root_)) return;
 			std::vector<index_type> stack;
-			stack.reserve(64);
+			stack.reserve(traversal_stack_reserve);
 			stack.push_back(root_);
 			while(!stack.empty()){
 				index_type index = stack.back();
@@ -308,8 +307,8 @@ namespace flat{
 		constexpr void postorder(F&& f) const{
 			if(!is_valid(root_)) return;
 			std::vector<index_type> stack1, stack2;
-			stack1.reserve(64);
-			stack2.reserve(64);
+			stack1.reserve(traversal_stack_reserve);
+			stack2.reserve(traversal_stack_reserve);
 			stack1.push_back(root_);
 			while(!stack1.empty()){
 				index_type index = stack1.back();
@@ -340,11 +339,12 @@ namespace flat{
 			value_type value;
 			index_type left = npos;
 			index_type right = npos;
-			constexpr explicit node(const value_type& v) noexcept : value(v){}
-			constexpr explicit node(value_type&& v) noexcept : value(std::move(v)){}
+			constexpr explicit node(const value_type& v)  noexcept(std::is_nothrow_copy_constructible_v<value_type>) : value(v){}
+			constexpr explicit node(value_type&& v)  noexcept(std::is_nothrow_move_constructible_v<value_type>) : value(std::move(v)){}
 			template<class... Args>
-			constexpr explicit node(std::in_place_t, Args&&... args) noexcept : value(std::forward<Args>(args)...){}
+			constexpr explicit node(std::in_place_t, Args&&... args)  noexcept(std::is_nothrow_constructible_v<value_type, Args...>) : value(std::forward<Args>(args)...){}
 		};
+		static constexpr size_type traversal_stack_reserve = 16; // Typical traversal depth (balanced trees rarely exceed log2(N). Just a perf hint, does not affect correctness.
 		index_type root_ = npos;
 		size_type alive_ = 0;
 		std::vector<std::optional<node>> nodes_;
@@ -375,7 +375,7 @@ namespace flat{
 			return idx;
 		}
 
-		constexpr void tombstone(index_type idx) noexcept{
+		constexpr void tombstone(index_type idx){
 			assert(is_valid(idx) && idx < nodes_.size() && nodes_[idx].has_value());
 			nodes_[idx].reset();
 			free_.push_back(idx);
@@ -390,9 +390,12 @@ namespace flat{
 			assert(is_valid(idx) && idx < nodes_.size() && nodes_[idx].has_value());
 			return *nodes_[idx];
 		}
-
-		// find node and its parent by key
-		constexpr std::pair<index_type, index_type> find_with_parent(const value_type& key) const noexcept{
+		
+		// find_with_parent is a performance optimization for erase()
+		// it returns both the matching node and its parent in one traversal.
+		constexpr std::pair<index_type, index_type> find_with_parent(const value_type& key) const
+			noexcept(noexcept(std::declval<const Compare&>()(std::declval<const T&>(), std::declval<const T&>()))) 
+		{
 			index_type parent = npos;
 			index_type cur = root_;
 			while(is_valid(cur)){
@@ -427,7 +430,7 @@ namespace flat{
 		}
 
 		// erase at specific index, given its parent
-		constexpr void erase_at(index_type parent, index_type cur) noexcept{
+		constexpr void erase_at(index_type parent, index_type cur){
 			node& n = get(cur);
 			// Case 1: 0 children
 			if(!is_valid(n.left) && !is_valid(n.right)){
@@ -455,6 +458,25 @@ namespace flat{
 			index_type succ_right = right_of(succ);
 			relink_child(succ_parent, succ, succ_right);
 			tombstone(succ);
+		}
+
+		template<class It>
+		void build_from_sorted_unique_into_empty(It first, It last){
+			assert(empty() && "Tree must be empty to use build_from_sorted_unique_into_empty");
+			const size_type n = static_cast<size_type>(std::distance(first, last));
+			if(n == 0){ root_ = npos; return; }
+			nodes_.reserve(n);
+
+			auto build = [&](auto&& self, It lo, It hi) -> index_type{
+				if(lo == hi) return npos;
+				It mid = lo + (std::distance(lo, hi) / 2);
+				index_type me = make_node(*mid);       // can throw, but *this* is still a valid empty-or-partial tree
+				node& m = get(me);
+				m.left = self(self, lo, mid);
+				m.right = self(self, std::next(mid), hi);
+				return me;
+				};
+			root_ = build(build, first, last);
 		}
 
 		// unique-key insert helpers
@@ -500,4 +522,10 @@ namespace flat{
 			return insert_impl(std::move(temp));
 		}
 	};
+
+	template<class T, class Compare, class IndexT>
+	void swap(bst<T, Compare, IndexT>& a, bst<T, Compare, IndexT>& b)
+		noexcept(noexcept(a.swap(b))){
+		a.swap(b);
+	}
 } //namespace flat
