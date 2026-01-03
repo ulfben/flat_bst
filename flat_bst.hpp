@@ -120,7 +120,7 @@ namespace flat::detail {
         }
 
         friend constexpr bool operator==(const inorder_iter& a, const inorder_iter& b) noexcept{
-            return a.tree_ == b.tree_ && a.cur_raw_ == b.cur_raw_;
+            return a.tree_ == b.tree_ && a.cur_raw_ == b.cur_raw_ && a.stack_ == b.stack_;
         }
         friend constexpr bool operator!=(const inorder_iter& a, const inorder_iter& b) noexcept{
             return !(a == b);
@@ -220,6 +220,9 @@ namespace flat {
         //note: noexcept! will std::terminate on invalid handle
         [[nodiscard]] constexpr const value_type& value_of(index_type handle) const noexcept{
             assert(is_handle_valid(handle) && "Invalid or stale bst handle");
+            if(!is_handle_valid(handle)){
+                std::terminate();
+			}
             return slots_[Layout::unpack_index(handle)].value();
         }
 
@@ -588,7 +591,8 @@ namespace flat {
                     succ_parent = succ;
                     succ = slots_[succ].left;
                 }
-                n.value() = std::move(slots_[succ].value());
+                T tmp = std::move(slots_[succ].value());   // may throw, tree unchanged
+                n.value() = std::move(tmp);                // may throw, but at least succ still exists
                 relink_child(succ_parent, succ, slots_[succ].right);
                 free_node(succ);
             }
