@@ -495,8 +495,7 @@ namespace flat {
                 idx = free_head_;
                 Slot& s = slots_[idx];
                 assert(!s.is_alive());
-                free_head_ = s.right;
-                s.generation++; // Odd -> Even (Alive)
+                free_head_ = s.right;              
                 try{ 
                     s.construct_value(std::forward<V>(v)); 
                 } catch(...){
