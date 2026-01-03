@@ -37,8 +37,8 @@ namespace flat {
         static constexpr int gen_bits =
             (total_bits >= 64) ? 32 :
             (total_bits >= 32) ? 12 :
-            (total_bits >= 16) ? 6 :
-            3;
+            (total_bits >= 16) ? 3 : // 13-bit index => 8191 usable raw indices (one reserved)
+            2;
 
         static constexpr int idx_bits = total_bits - gen_bits;
 
@@ -399,7 +399,7 @@ namespace flat {
     private:
         struct Slot{
             // Generation logic: Even = Alive, Odd = Free.
-            index_type generation = 0;
+            index_type generation = 1;
             index_type left = npos_raw;
             index_type right = npos_raw; // Acts as next_free when dead
 
@@ -496,29 +496,40 @@ namespace flat {
             if(free_head_ != npos_raw){
                 idx = free_head_;
                 Slot& s = slots_[idx];
+                assert(!s.is_alive());
                 free_head_ = s.right;
                 s.generation++; // Odd -> Even (Alive)
-                try{ s.construct_value(std::forward<V>(v)); } catch(...){
-                    s.generation--; // Revert
+                try{ 
+                    s.construct_value(std::forward<V>(v)); 
+                } catch(...){
+                    //re-push on freelist
                     s.right = free_head_;
                     free_head_ = idx;
                     throw;
                 }
+                s.generation++; // odd -> even, now alive
                 s.left = npos_raw;
                 s.right = npos_raw;
             } else{
                 idx = static_cast<index_type>(slots_.size());
                 // IMPORTANT: idx == npos_raw is reserved for sentinel and cannot be allocated.
                 if(idx >= npos_raw) throw std::length_error("BST index overflow");
-                slots_.emplace_back(); // gen 0
-                try{ slots_.back().construct_value(std::forward<V>(v)); } catch(...){ slots_.pop_back(); throw; }
+				slots_.emplace_back(); // generation starts at 1 (free)
+                try{ 
+                    slots_.back().construct_value(std::forward<V>(v)); 
+                    slots_.back().generation++; // free -> alive
+                } catch(...){ 
+                    slots_.pop_back(); 
+                    throw; 
+                }
             }
-            alive_count_++;
+            ++alive_count_;
             assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
             return idx;
         }
 
         void free_node(index_type idx){
+            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
             Slot& s = slots_[idx];
             assert(s.is_alive());
             s.destroy_value();
