@@ -39,12 +39,10 @@ namespace flat {
             (total_bits >= 32) ? 12 :
             (total_bits >= 16) ? 3 : // 13-bit index => 8191 usable raw indices (one reserved)
             2;
-
+                
+        static_assert(gen_bits >= 0 && gen_bits < total_bits, "gen_bits must be in [0, digits)");
         static constexpr int idx_bits = total_bits - gen_bits;
-
-        static_assert(idx_bits > 0, "IndexT too small for chosen generation bits");
-
-        static constexpr IndexT idx_mask = (IndexT(1) << idx_bits) - 1;
+        static constexpr IndexT idx_mask = (~IndexT(0)) >> gen_bits;
         static constexpr IndexT gen_mask = ~idx_mask;
 
         static constexpr IndexT unpack_index(IndexT handle) noexcept{ return handle & idx_mask; }
@@ -409,7 +407,7 @@ namespace flat {
 
             template<typename... Args>
             constexpr void construct_value(Args&&... args){
-                ::new (reinterpret_cast<void*>(storage)) T(std::forward<Args>(args)...);
+                std::construct_at(reinterpret_cast<T*>(storage), std::forward<Args>(args)...);
             }
 
             constexpr void destroy_value() noexcept{
