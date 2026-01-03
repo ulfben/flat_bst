@@ -6,526 +6,638 @@
 // Live demo: https://compiler-explorer.com/z/rqEKxGsTT
 // Requires C++26. See main.cpp for usage examples.
 // Ulf Benjaminsson, 2025
+
 #pragma once
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <cstdint>
 #include <functional>
-#include <initializer_list>
 #include <iterator>
 #include <limits>
-#include <optional>
+#include <memory>
+#include <new>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-// forward declare the class template so the iterator can name it
 namespace flat {
-	template<class T, class Compare = std::less<T>, class IndexT = uint32_t>
-	class bst;
+
+    // Configuration traits for packing Index + Generation into IndexT
+    // Default: 32-bit IndexT -> 20 bits index (1M items), 12 bits generation
+    template <typename IndexT>
+    struct index_layout{
+        static_assert(std::is_unsigned_v<IndexT>, "IndexT must be unsigned");
+
+        static constexpr int total_bits = std::numeric_limits<IndexT>::digits;
+
+        // 64-bit indices get 32 bits for generation. 32-bit indices get 12.
+        // For smaller IndexT we scale down, otherwise shifts/masks become ill-formed.
+        static constexpr int gen_bits =
+            (total_bits >= 64) ? 32 :
+            (total_bits >= 32) ? 12 :
+            (total_bits >= 16) ? 6 :
+            3;
+
+        static constexpr int idx_bits = total_bits - gen_bits;
+
+        static_assert(idx_bits > 0, "IndexT too small for chosen generation bits");
+
+        static constexpr IndexT idx_mask = (IndexT(1) << idx_bits) - 1;
+        static constexpr IndexT gen_mask = ~idx_mask;
+
+        static constexpr IndexT unpack_index(IndexT handle) noexcept{ return handle & idx_mask; }
+        static constexpr IndexT unpack_gen(IndexT handle) noexcept{ return handle >> idx_bits; }
+        static constexpr IndexT pack(IndexT idx, IndexT gen) noexcept{ return (gen << idx_bits) | (idx & idx_mask); }
+    };
+
+    // forward declare the class template so the iterator can name it
+    template<class T, class Compare = std::less<T>, class IndexT = uint32_t>
+    class bst;
 };
 
 //namespace for the iterator implementation
 namespace flat::detail {
-	template<class T, class Compare, class IndexT>
-	class inorder_iter{
-		using tree_t = bst<T, Compare, IndexT>;
-		using index_type = IndexT;
-		static constexpr index_type npos = tree_t::npos;
-		static constexpr size_t traversal_stack_reserve = 16;
-		const tree_t* tree_ = nullptr;
-		std::vector<index_type> stack_;
-		index_type cur_ = npos;
+    template<class T, class Compare, class IndexT>
+    class inorder_iter{
+        using tree_t = bst<T, Compare, IndexT>;
+        static constexpr size_t traversal_stack_reserve = 16;
+        // iterators use raw indices internally for performance, not handles
+        const tree_t* tree_ = nullptr;
+        std::vector<IndexT> stack_;
+        IndexT cur_raw_ = tree_t::npos_raw;
 
-		constexpr void push_left_(index_type i){
-			while(tree_t::is_valid(i)){
-				stack_.push_back(i);
-				i = tree_->left_of(i);
-			}
-		}
+        constexpr void push_left_(IndexT i){
+            while(i != tree_t::npos_raw){
+                stack_.push_back(i);
+                i = tree_->internal_left(i);
+            }
+        }
 
-	public:
-		using value_type = const T;
-		using reference = const T&;
-		using pointer = const T*;
-		using difference_type = std::ptrdiff_t;
-		using iterator_category = std::forward_iterator_tag;
+    public:
+        using value_type = const T;
+        using reference = const T&;
+        using pointer = const T*;
+        using difference_type = std::ptrdiff_t;
+        using iterator_category = std::forward_iterator_tag;
 
-		constexpr inorder_iter() = default;
-		explicit constexpr inorder_iter(const tree_t* t, bool end) : tree_(t){
-			if(!t || end || !tree_t::is_valid(t->root_index())){ cur_ = npos; return; }
-			stack_.reserve(traversal_stack_reserve);
-			push_left_(t->root_index());
-			cur_ = stack_.back();
-			stack_.pop_back();
-		}
+        constexpr inorder_iter() = default;
+        explicit constexpr inorder_iter(const tree_t* t, bool end) : tree_(t){
+            if(!t || end || t->empty()){ cur_raw_ = tree_t::npos_raw; return; }
+            stack_.reserve(traversal_stack_reserve);
+            push_left_(t->internal_root());
+            if(!stack_.empty()){
+                cur_raw_ = stack_.back();
+                stack_.pop_back();
+            } else{
+                cur_raw_ = tree_t::npos_raw;
+            }
+        }
 
-		constexpr reference operator*()  const noexcept{ return tree_->value_of(cur_); }
-		constexpr pointer   operator->() const noexcept{ return &tree_->value_of(cur_); }
+        constexpr reference operator*() const noexcept{ return tree_->internal_value(cur_raw_); }
+        constexpr pointer   operator->() const noexcept{ return &tree_->internal_value(cur_raw_); }
 
-		constexpr inorder_iter& operator++(){
-			if(!tree_ || !tree_t::is_valid(cur_)){
-				return *this;
-			}
-			index_type next = tree_->right_of(cur_);
-			if(tree_t::is_valid(next)){
-				push_left_(next);
-			}
-			if(stack_.empty()){
-				cur_ = npos;
-			} else{
-				cur_ = stack_.back();
-				stack_.pop_back();
-			}
-			return *this;
-		}
-		constexpr inorder_iter operator++(int){
-			auto tmp = *this;
-			++(*this);
-			return tmp;
-		}
+        constexpr inorder_iter& operator++(){
+            if(cur_raw_ == tree_t::npos_raw) return *this;
 
-		friend constexpr bool operator==(const inorder_iter& a, const inorder_iter& b) noexcept{
-			return a.tree_ == b.tree_ && a.cur_ == b.cur_;
-		}
-		friend constexpr bool operator!=(const inorder_iter& a, const inorder_iter& b) noexcept{
-			return !(a == b);
-		}
-	};
-} // namespace flat::detail
+            IndexT right = tree_->internal_right(cur_raw_);
+            if(right != tree_t::npos_raw){
+                push_left_(right);
+            }
 
-namespace flat{
+            if(stack_.empty()){
+                cur_raw_ = tree_t::npos_raw;
+            } else{
+                cur_raw_ = stack_.back();
+                stack_.pop_back();
+            }
+            return *this;
+        }
 
-	template<class T, class Compare, class IndexT>
-	class bst final{
-	public:
-		using const_inorder_iterator = flat::detail::inorder_iter<T, Compare, IndexT>;
-		using value_type = T;
-		using size_type = std::size_t;
-		using index_type = IndexT;
+        constexpr inorder_iter operator++(int){
+            auto tmp = *this;
+            ++(*this);
+            return tmp;
+        }
 
-		static_assert(std::is_unsigned_v<index_type>, "IndexT must be an unsigned integer type");
-		static constexpr index_type npos = std::numeric_limits<index_type>::max();
+        friend constexpr bool operator==(const inorder_iter& a, const inorder_iter& b) noexcept{
+            return a.tree_ == b.tree_ && a.cur_raw_ == b.cur_raw_;
+        }
+        friend constexpr bool operator!=(const inorder_iter& a, const inorder_iter& b) noexcept{
+            return !(a == b);
+        }
+    };
+}  // namespace flat::detail
 
-		bst() = default;
+namespace flat {
 
-		constexpr explicit bst(Compare cmp) 
-			noexcept(std::is_nothrow_move_constructible_v<Compare>) 
-			: comp_(std::move(cmp)){}
+    template<class T, class Compare, class IndexT>
+    class bst final{
+        using Layout = index_layout<IndexT>;
+    public:
+        using const_inorder_iterator = flat::detail::inorder_iter<T, Compare, IndexT>;
+        using value_type = T;
+        using size_type = std::size_t;
+        using index_type = IndexT;
 
-		// if you already have sorted-unique data, create an empty bst and call build_from_sorted_unique instead
-		// this ctor just does the right thing for arbitrary ranges.
-		template<class It>
-		bst(It first, It last, Compare cmp = Compare{})
-			: comp_(std::move(cmp)){
-			if(first == last){
-				return;
-			}
-			if constexpr(std::random_access_iterator<It>){ // possible fast path if already sorted and unique				
-				bool sorted = std::is_sorted(first, last, comp_);
-				bool unique = sorted &&
-					std::adjacent_find(first, last, [&](const value_type& a, const value_type& b){
-					return !comp_(a, b) && !comp_(b, a);
-						}) == last;
-				if(sorted && unique){
-					build_from_sorted_unique(first, last);
-					return;
-				}
-			}
-			build_from_range(first, last);
-		}
+        // Keep public API intact: npos is the max value (old behavior).
+        static constexpr index_type npos = std::numeric_limits<index_type>::max();
 
-		bst(std::initializer_list<value_type> values, Compare cmp = Compare{}) : bst(values.begin(), values.end(), cmp){}
+        // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw,
+        // so raw indices are always in [0, npos_raw).
+        static constexpr index_type npos_raw = Layout::idx_mask;
 
-		[[nodiscard]] constexpr size_type size() const noexcept{ return alive_; }
-		[[nodiscard]] constexpr size_type holes() const noexcept{ return free_.size(); }
-		[[nodiscard]] constexpr size_type capacity() const noexcept{ return nodes_.capacity(); }
-		[[nodiscard]] constexpr bool empty() const noexcept{ return alive_ == 0; }
+        bst() = default;
 
-		//accessors for the iterators to be able to do their work
-		//they bloat the public API a bit, but I don't have to deal with friend classes so...
-		[[nodiscard]] inline constexpr index_type root_index() const noexcept{ return root_; }
-		static inline constexpr bool is_valid(index_type i) noexcept{ return i != npos; }
-		[[nodiscard]] inline constexpr index_type left_of(index_type i)  const noexcept{ return get(i).left; }
-		[[nodiscard]] inline constexpr index_type right_of(index_type i) const noexcept{ return get(i).right; }
-		[[nodiscard]] inline constexpr const value_type& value_of(index_type i) const noexcept{ return get(i).value; }
+        constexpr explicit bst(Compare cmp) noexcept(std::is_nothrow_move_constructible_v<Compare>)
+            : comp_(std::move(cmp)){}
+
+        // if you already have sorted-unique data, create an empty bst and call build_from_sorted_unique instead
+        // this ctor just does the right thing for arbitrary ranges.
+        template<class It>
+        bst(It first, It last, Compare cmp = Compare{}) : comp_(std::move(cmp)){
+            if(first == last) return;
+            if constexpr(std::random_access_iterator<It>){
+                bool sorted = std::is_sorted(first, last, comp_);
+                bool unique = sorted && std::adjacent_find(first, last, [&](const auto& a, const auto& b){
+                    return !comp_(a, b) && !comp_(b, a);
+                    }) == last;
+                if(sorted && unique){
+                    build_from_sorted_unique(first, last);
+                    return;
+                }
+            }
+            build_from_range(first, last);
+        }
+
+        bst(std::initializer_list<value_type> values, Compare cmp = Compare{}) : bst(values.begin(), values.end(), cmp){}
+
+        // Rule of 5: Slot is a proper RAII type so we can default these safely.
+        ~bst() = default;
+        bst(const bst&) = default;
+        bst& operator=(const bst&) = default;
+        bst(bst&&) noexcept = default;
+        bst& operator=(bst&&) noexcept = default;
+
+        [[nodiscard]] constexpr size_type size() const noexcept{ return alive_count_; }
+        [[nodiscard]] constexpr size_type holes() const noexcept{ return slots_.size() - alive_count_; }
+        [[nodiscard]] constexpr size_type capacity() const noexcept{ return slots_.capacity(); }
+        [[nodiscard]] constexpr bool empty() const noexcept{ return alive_count_ == 0; }
+
+        inline constexpr const_inorder_iterator begin_inorder() const{ return const_inorder_iterator(this, false); }
+        inline constexpr const_inorder_iterator end_inorder()   const{ return const_inorder_iterator(this, true); }
+        inline constexpr auto begin() const{ return begin_inorder(); }
+        inline constexpr auto end() const{ return end_inorder(); }
+
+        //accessors for the iterators to be able to do their work
+        //they bloat the public API a bit, but I don't have to deal with friend classes so...
+        [[nodiscard]] constexpr index_type root_index() const noexcept{
+            return (root_idx_ == npos_raw) ? npos : make_handle(root_idx_);
+        }
+
+        static constexpr bool is_valid(index_type handle) noexcept{ return handle != npos; }
+
+        // returns true if handle is valid AND matches the current generation of the slot
+        [[nodiscard]] constexpr bool is_handle_valid(index_type handle) const noexcept{
+            if(handle == npos) return false;
+            index_type idx = Layout::unpack_index(handle);
+            index_type gen = Layout::unpack_gen(handle);
+            if(idx >= slots_.size()) return false;
+            return (slots_[idx].generation == gen) && slots_[idx].is_alive();
+        }
+
+        [[nodiscard]] constexpr index_type left_of(index_type handle) const noexcept{
+            if(!is_handle_valid(handle)) return npos;
+            index_type left_idx = slots_[Layout::unpack_index(handle)].left;
+            return (left_idx == npos_raw) ? npos : make_handle(left_idx);
+        }
+
+        [[nodiscard]] constexpr index_type right_of(index_type handle) const noexcept{
+            if(!is_handle_valid(handle)) return npos;
+            index_type right_idx = slots_[Layout::unpack_index(handle)].right;
+            return (right_idx == npos_raw) ? npos : make_handle(right_idx);
+        }
+
+        //note: noexcept! will std::terminate on invalid handle
+        [[nodiscard]] constexpr const value_type& value_of(index_type handle) const noexcept{
+            assert(is_handle_valid(handle) && "Invalid or stale bst handle");
+            return slots_[Layout::unpack_index(handle)].value();
+        }
+
+        constexpr void reserve(size_type n){ slots_.reserve(n); }
+
+        constexpr void clear() noexcept{
+            slots_.clear();
+            root_idx_ = npos_raw;
+            free_head_ = npos_raw;
+            alive_count_ = 0;
+        }
+
+        void swap(bst& other) noexcept{
+            using std::swap;
+            swap(slots_, other.slots_);
+            swap(root_idx_, other.root_idx_);
+            swap(free_head_, other.free_head_);
+            swap(alive_count_, other.alive_count_);
+            swap(comp_, other.comp_);
+        }
+
+        constexpr void rebuild_compact(){ rebalance(); }
+
+        constexpr void rebalance(){
+            if(alive_count_ < 2) return;
+            std::vector<value_type> vals;
+            vals.reserve(alive_count_);
+            inorder([&](const value_type& v){ vals.push_back(v); });
+            // Building from sorted unique completely replaces the storage,
+            // effectively compacting and resetting generations for reused slots.
+            // Note: This INVALIDATES all existing external handles.
+            bst tmp(comp_);
+            tmp.build_from_sorted_unique_into_empty(vals.begin(), vals.end());
+            swap(tmp);
+        }
+
+        // insert / emplace, returns {index, inserted}
+        constexpr std::pair<index_type, bool> insert(const value_type& v){ return insert_impl(v); }
+        constexpr std::pair<index_type, bool> insert(value_type&& v){ return insert_impl(std::move(v)); }
+
+        template<class... Args>
+        constexpr std::pair<index_type, bool> emplace(Args&&... args){
+            value_type temp(std::forward<Args>(args)...);
+            return insert_impl(std::move(temp));
+        }
+
+        template<class It>
+        size_type insert(It first, It last){
+            if constexpr(std::forward_iterator<It>){
+                auto n = static_cast<size_type>(std::distance(first, last));
+                if(n) slots_.reserve(slots_.size() + n);
+            }
+            size_type inserted = 0;
+            for(; first != last; ++first){
+                inserted += insert(*first).second ? 1 : 0;
+            }
+            return inserted;
+        }
+
+        // build balanced tree from pre-sorted-unique input. replacing any existing tree contents
+        template<class It>
+        void build_from_sorted_unique(It first, It last){
+            assert(std::is_sorted(first, last, comp_) && "Input range must be sorted according to Compare");
+            bst tmp(comp_);
+            tmp.build_from_sorted_unique_into_empty(first, last);
+            swap(tmp);
+        }
+
+        // build balanced tree from arbitrary input range (sorts + uniques)
+        template<class It>
+        void build_from_range(It first, It last){
+            std::vector<value_type> vals;
+            if constexpr(std::forward_iterator<It>){
+                vals.reserve(static_cast<size_type>(std::distance(first, last)));
+            }
+            for(; first != last; ++first) vals.push_back(*first);
+            std::sort(vals.begin(), vals.end(), comp_);
+            vals.erase(std::unique(vals.begin(), vals.end(),
+                [&](const value_type& a, const value_type& b){
+                    return !comp_(a, b) && !comp_(b, a);
+                }), vals.end());
+            build_from_sorted_unique(vals.begin(), vals.end());
+        }
+
+        [[nodiscard]] constexpr index_type find_index(const value_type& key) const noexcept{
+            index_type raw = find_internal_raw(key).second;
+            return (raw == npos_raw) ? npos : make_handle(raw);
+        }
+
+        [[nodiscard]] constexpr bool contains(const value_type& key) const noexcept{
+            return find_internal_raw(key).second != npos_raw;
+        }
+
+        // returns pointer to value or nullptr
+        [[nodiscard]] constexpr const value_type* find(const value_type& key) const noexcept{
+            index_type raw = find_internal_raw(key).second;
+            if(raw == npos_raw) return nullptr;
+            return &slots_[raw].value();
+        }
+
+        [[nodiscard]] constexpr const value_type* get_ptr(index_type handle) const noexcept{
+            if(!is_handle_valid(handle)) return nullptr;
+            return &slots_[Layout::unpack_index(handle)].value();
+        }
+
+        // erase by key - returns true if erased
+        constexpr bool erase(const value_type& key){
+            auto [parent, cur] = find_internal_raw(key);
+            if(cur == npos_raw) return false;
+            erase_internal(parent, cur);
+            return true;
+        }
+
+       // traversals: inorder, preorder, postorder. Callback recieves const T&
+        template<class F>
+        constexpr void inorder(F&& f) const{
+            std::vector<index_type> stack;
+            stack.reserve(traversal_stack_reserve);
+            index_type index = root_idx_;
+            while(index != npos_raw || !stack.empty()){
+                while(index != npos_raw){
+                    stack.push_back(index);
+                    index = slots_[index].left;
+                }
+                index = stack.back();
+                stack.pop_back();
+                f(slots_[index].value());
+                index = slots_[index].right;
+            }
+        }
+
+        template<class F>
+        constexpr void preorder(F&& f) const{
+            if(root_idx_ == npos_raw) return;
+            std::vector<index_type> stack;
+            stack.reserve(traversal_stack_reserve);
+            stack.push_back(root_idx_);
+            while(!stack.empty()){
+                index_type index = stack.back();
+                stack.pop_back();
+                const Slot& n = slots_[index];
+                f(n.value());
+                if(n.right != npos_raw) stack.push_back(n.right);
+                if(n.left != npos_raw) stack.push_back(n.left);
+            }
+        }
+
+        template<class F>
+        constexpr void postorder(F&& f) const{
+            if(root_idx_ == npos_raw) return;
+            std::vector<index_type> stack1, stack2;
+            stack1.reserve(traversal_stack_reserve);
+            stack2.reserve(traversal_stack_reserve);
+            stack1.push_back(root_idx_);
+            while(!stack1.empty()){
+                index_type index = stack1.back();
+                stack1.pop_back();
+                stack2.push_back(index);
+                const Slot& n = slots_[index];
+                if(n.left != npos_raw) stack1.push_back(n.left);
+                if(n.right != npos_raw) stack1.push_back(n.right);
+            }
+            while(!stack2.empty()){
+                f(slots_[stack2.back()].value());
+                stack2.pop_back();
+            }
+        }
+
+        // more access for iterators
+        constexpr index_type internal_root() const{ return root_idx_; }
+        constexpr index_type internal_left(index_type raw) const{ return slots_[raw].left; }
+        constexpr index_type internal_right(index_type raw) const{ return slots_[raw].right; }
+        constexpr const T& internal_value(index_type raw) const{ return slots_[raw].value(); }
+
+    private:
+        struct Slot{
+            // Generation logic: Even = Alive, Odd = Free.
+            index_type generation = 0;
+            index_type left = npos_raw;
+            index_type right = npos_raw; // Acts as next_free when dead
+
+            alignas(T) std::byte storage[sizeof(T)];
+
+            constexpr bool is_alive() const noexcept{ return (generation % 2) == 0; }
+
+            template<typename... Args>
+            constexpr void construct_value(Args&&... args){
+                ::new (reinterpret_cast<void*>(storage)) T(std::forward<Args>(args)...);
+            }
+
+            constexpr void destroy_value() noexcept{
+                std::destroy_at(std::launder(reinterpret_cast<T*>(storage)));
+            }
+
+            constexpr T& value() noexcept{ return *std::launder(reinterpret_cast<T*>(storage)); }
+            constexpr const T& value() const noexcept{ return *std::launder(reinterpret_cast<const T*>(storage)); }
+
+            // RAII: ensure Slot copies/moves only the live T, and destroys when needed.
+            Slot() = default;
+
+            Slot(const Slot& other)
+                noexcept(std::is_nothrow_copy_constructible_v<T>)
+                : generation(other.generation), left(other.left), right(other.right){
+                if(other.is_alive()){
+                    construct_value(other.value());
+                }
+            }
 
 
-		constexpr void reserve(size_type n){ nodes_.reserve(n); }
-		constexpr void rebuild_compact(){ rebalance(); }
+            Slot(Slot&& other)
+                noexcept(std::is_nothrow_move_constructible_v<T>)
+                : generation(other.generation), left(other.left), right(other.right){
+                if(other.is_alive()){
+                    construct_value(std::move(other.value()));
+                    other.destroy_value();
+                    other.generation++; // make 'other' free (odd), preserving its free-list link fields as copied above
+                }
+            }
 
-		constexpr void clear() noexcept{
-			nodes_.clear();
-			free_.clear();
-			root_ = npos;
-			alive_ = 0;
-		}
+            friend void swap(Slot& a, Slot& b)
+                noexcept(
+                    std::is_nothrow_move_constructible_v<T> &&
+                    noexcept(std::swap(std::declval<T&>(), std::declval<T&>()))
+                    ){
+                using std::swap;
+                const bool a_alive = a.is_alive();
+                const bool b_alive = b.is_alive();
 
-		void swap(bst& other) noexcept(noexcept(std::swap(comp_, other.comp_))){
-			using std::swap;
-			swap(root_, other.root_);
-			swap(alive_, other.alive_);
-			swap(nodes_, other.nodes_);
-			swap(free_, other.free_);
-			swap(comp_, other.comp_);
-		}
+                if(a_alive && b_alive){
+                    swap(a.value(), b.value());
+                } else if(a_alive && !b_alive){
+                    b.construct_value(std::move(a.value()));
+                    a.destroy_value();
+                } else if(!a_alive && b_alive){
+                    a.construct_value(std::move(b.value()));
+                    b.destroy_value();
+                } // else: both dead
+                
+                swap(a.generation, b.generation);
+                swap(a.left, b.left);
+                swap(a.right, b.right);
+            }
 
-		// insert / emplace, returns {index, inserted}
-		constexpr std::pair<index_type, bool> insert(const value_type& v){
-			return insert_impl(v);
-		}
-		constexpr std::pair<index_type, bool> insert(value_type&& v){
-			return insert_impl(std::move(v));
-		}
-		template<class... Args>
-		constexpr std::pair<index_type, bool> emplace(Args&&... args){
-			return emplace_impl(std::forward<Args>(args)...);
-		}
+            // One assignment operator handles both copy and move assignment.
+            Slot& operator=(Slot other) noexcept(noexcept(swap(*this, other))){
+                swap(*this, other);
+                return *this;
+            }
 
-		//bulk insert from range, returns number of inserted elements
-		//note: this merges into existing tree, does not rebalance
-		template<class It>
-		size_type insert(It first, It last){
-			if constexpr(std::forward_iterator<It>){
-				auto n = static_cast<size_type>(std::distance(first, last));
-				if(n) nodes_.reserve(nodes_.size() + n); // best effort
-			}
-			size_type inserted = 0;
-			for(; first != last; ++first){
-				inserted += insert(*first).second ? 1 : 0;
-			}
-			return inserted;
-		}
+            ~Slot() noexcept{
+                if(is_alive()){
+                    destroy_value();
+                }
+            }
+        };
 
-		// build balanced tree from pre-sorted-unique input. replacing any existing tree contents
-		template<class It>
-		void build_from_sorted_unique(It first, It last){
-			assert(std::is_sorted(first, last, comp_) && "Input range must be sorted according to Compare");
-			bst tmp(comp_);
-			tmp.build_from_sorted_unique_into_empty(first, last);
-			swap(tmp);
-		}
+        static constexpr size_type traversal_stack_reserve = 16; // Typical traversal depth (balanced trees rarely exceed log2(N). Just a perf hint, does not affect correctness.
+        std::vector<Slot> slots_;
+        index_type root_idx_ = npos_raw;
+        index_type free_head_ = npos_raw;
+        size_type alive_count_ = 0;
+        [[no_unique_address]] Compare comp_{};
 
-		// build balanced tree from arbitrary input range (sorts + uniques)
-		template<class It>
-		void build_from_range(It first, It last){
-			std::vector<value_type> vals;
-			if constexpr(std::forward_iterator<It>){
-				vals.reserve(static_cast<size_type>(std::distance(first, last)));
-			}
-			for(; first != last; ++first){
-				vals.push_back(*first);
-			}
-			std::sort(vals.begin(), vals.end(), comp_);
-			vals.erase(std::unique(vals.begin(), vals.end(),
-				[&](const value_type& a, const value_type& b){
-					return !comp_(a, b) && !comp_(b, a);
-				}), vals.end());
-			build_from_sorted_unique(vals.begin(), vals.end());
-		}
+        constexpr index_type make_handle(index_type raw_idx) const noexcept{
+            return Layout::pack(raw_idx, slots_[raw_idx].generation);
+        }
 
-		void rebalance(){
-			if(alive_ < 2){ return; }
-			std::vector<value_type> vals;
-			vals.reserve(alive_);
-			inorder([&](const value_type& v){ vals.push_back(v); }); //inorder sorts by cmp_		
-			build_from_sorted_unique(vals.begin(), vals.end());
-		}
+        template<class V>
+        index_type allocate_node(V&& v){
+            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
+            index_type idx;
+            if(free_head_ != npos_raw){
+                idx = free_head_;
+                Slot& s = slots_[idx];
+                free_head_ = s.right;
+                s.generation++; // Odd -> Even (Alive)
+                try{ s.construct_value(std::forward<V>(v)); } catch(...){
+                    s.generation--; // Revert
+                    s.right = free_head_;
+                    free_head_ = idx;
+                    throw;
+                }
+                s.left = npos_raw;
+                s.right = npos_raw;
+            } else{
+                idx = static_cast<index_type>(slots_.size());
+                // IMPORTANT: idx == npos_raw is reserved for sentinel and cannot be allocated.
+                if(idx >= npos_raw) throw std::length_error("BST index overflow");
+                slots_.emplace_back(); // gen 0
+                try{ slots_.back().construct_value(std::forward<V>(v)); } catch(...){ slots_.pop_back(); throw; }
+            }
+            alive_count_++;
+            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
+            return idx;
+        }
 
-		[[nodiscard]] constexpr index_type find_index(const value_type& key) const noexcept{
-			return find_with_parent(key).second;
-		}
+        void free_node(index_type idx){
+            Slot& s = slots_[idx];
+            assert(s.is_alive());
+            s.destroy_value();
+            s.generation++; // Even -> Odd (Free)
+            s.left = npos_raw;
+            s.right = free_head_;
+            free_head_ = idx;
+            alive_count_--;
+            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
+        }
 
-		[[nodiscard]] constexpr bool contains(const value_type& key) const noexcept{
-			return find_index(key) != npos;
-		}
+        constexpr std::pair<index_type, index_type> find_internal_raw(const value_type& key) const{
+            index_type parent = npos_raw;
+            index_type cur = root_idx_;
+            while(cur != npos_raw){
+                const Slot& s = slots_[cur];
+                if(comp_(key, s.value())){
+                    parent = cur;
+                    cur = s.left;
+                } else if(comp_(s.value(), key)){
+                    parent = cur;
+                    cur = s.right;
+                } else{
+                    return {parent, cur};
+                }
+            }
+            return {npos_raw, npos_raw};
+        }
 
-		// returns pointer to value or nullptr 
-		[[nodiscard]] inline constexpr const value_type* find(const value_type& key) const noexcept{
-			index_type idx = find_index(key);
-			return get_ptr(idx);
-		}
+        constexpr void relink_child(index_type parent, index_type old_child, index_type new_child){
+            if(parent == npos_raw){
+                root_idx_ = new_child;
+                return;
+            }
 
-		[[nodiscard]] inline constexpr const value_type* get_ptr(index_type i) const noexcept{
-			if(is_valid(i) && i < nodes_.size() && nodes_[i].has_value()){
-				return &value_of(i);
-			}
-			return nullptr;
-		}
+            Slot& p = slots_[parent];
+            if(p.left == old_child){
+                p.left = new_child;
+            } else if(p.right == old_child){
+                p.right = new_child;
+            } else{
+                assert(false && "parent does not point to old_child");
+            }
+        }
 
+        constexpr void erase_internal(index_type parent, index_type cur){
+            Slot& n = slots_[cur];
+            if(n.left == npos_raw && n.right == npos_raw){
+                relink_child(parent, cur, npos_raw);
+                free_node(cur);
+            } else if(n.left == npos_raw || n.right == npos_raw){
+                index_type child = (n.left != npos_raw) ? n.left : n.right;
+                relink_child(parent, cur, child);
+                free_node(cur);
+            } else{
+                index_type succ_parent = cur;
+                index_type succ = n.right;
+                while(slots_[succ].left != npos_raw){
+                    succ_parent = succ;
+                    succ = slots_[succ].left;
+                }
+                n.value() = std::move(slots_[succ].value());
+                relink_child(succ_parent, succ, slots_[succ].right);
+                free_node(succ);
+            }
+        }
 
-		// erase by key - returns true if erased
-		constexpr bool erase(const value_type& key){
-			auto [parent, cur] = find_with_parent(key);
-			if(cur == npos){
-				return false;
-			}
-			erase_at(parent, cur);
-			return true;
-		}
+        template<class V>
+        constexpr std::pair<index_type, bool> insert_impl(V&& v){
+            if(root_idx_ == npos_raw){
+                index_type idx = allocate_node(std::forward<V>(v));
+                root_idx_ = idx;
+                return {make_handle(idx), true};
+            }
+            index_type parent = npos_raw;
+            index_type cur = root_idx_;
+            bool go_left = false;
+            while(cur != npos_raw){
+                parent = cur;
+                Slot& s = slots_[cur];
+                if(comp_(v, s.value())){
+                    go_left = true;
+                    cur = s.left;
+                } else if(comp_(s.value(), v)){
+                    go_left = false;
+                    cur = s.right;
+                } else{
+                    return {make_handle(cur), false};
+                }
+            }
+            index_type idx = allocate_node(std::forward<V>(v));
+            if(go_left) slots_[parent].left = idx;
+            else slots_[parent].right = idx;
+            return {make_handle(idx), true};
+        }
 
-		// traversals: inorder, preorder, postorder. Callback recieves const T&
-		template<class F>
-		constexpr void inorder(F&& f) const{
-			std::vector<index_type> stack;
-			stack.reserve(traversal_stack_reserve);
-			index_type index = root_;
-			while(is_valid(index) || !stack.empty()){
-				while(is_valid(index)){
-					stack.push_back(index);
-					index = left_of(index);
-				}
-				index = stack.back();
-				stack.pop_back();
-				f(value_of(index));
-				index = right_of(index);
-			}
-		}
+        template<class It>
+        void build_from_sorted_unique_into_empty(It first, It last){
+            const size_type n = static_cast<size_type>(std::distance(first, last));
+            if(n == 0){ root_idx_ = npos_raw; return; }
+            slots_.reserve(n);
 
-		template<class F>
-		constexpr void preorder(F&& f) const{
-			if(!is_valid(root_)) return;
-			std::vector<index_type> stack;
-			stack.reserve(traversal_stack_reserve);
-			stack.push_back(root_);
-			while(!stack.empty()){
-				index_type index = stack.back();
-				stack.pop_back();
-				f(value_of(index));
-				const node& n = get(index);
-				if(is_valid(n.right)){
-					stack.push_back(n.right);
-				}
-				if(is_valid(n.left)){
-					stack.push_back(n.left);
-				}
-			}
-		}
+            auto build = [&](auto&& self, It lo, It hi) -> index_type{
+                if(lo == hi) return npos_raw;
+                It mid = lo + (std::distance(lo, hi) / 2);
+                // allocate_node will just append since we started empty
+                index_type me = allocate_node(*mid);
+                Slot& m = slots_[me];
+                m.left = self(self, lo, mid);
+                m.right = self(self, std::next(mid), hi);
+                return me;
+                };
+            root_idx_ = build(build, first, last);
+        }
+    };
 
-		template<class F>
-		constexpr void postorder(F&& f) const{
-			if(!is_valid(root_)) return;
-			std::vector<index_type> stack1, stack2;
-			stack1.reserve(traversal_stack_reserve);
-			stack2.reserve(traversal_stack_reserve);
-			stack1.push_back(root_);
-			while(!stack1.empty()){
-				index_type index = stack1.back();
-				stack1.pop_back();
-				stack2.push_back(index);
-				const node& n = get(index);
-				if(is_valid(n.left)){
-					stack1.push_back(n.left);
-				}
-				if(is_valid(n.right)){
-					stack1.push_back(n.right);
-				}
-			}
-			while(!stack2.empty()){
-				index_type index = stack2.back();
-				stack2.pop_back();
-				f(value_of(index));
-			}
-		}
-
-		inline constexpr const_inorder_iterator begin_inorder() const{ return const_inorder_iterator(this, false); }
-		inline constexpr const_inorder_iterator end_inorder()   const{ return const_inorder_iterator(this, true); }
-		inline constexpr auto begin() const{ return begin_inorder(); }
-		inline constexpr auto end() const{ return end_inorder(); }
-
-	private:
-		struct node final{
-			value_type value;
-			index_type left = npos;
-			index_type right = npos;
-			constexpr explicit node(const value_type& v)  noexcept(std::is_nothrow_copy_constructible_v<value_type>) : value(v){}
-			constexpr explicit node(value_type&& v)  noexcept(std::is_nothrow_move_constructible_v<value_type>) : value(std::move(v)){}
-			template<class... Args>
-			constexpr explicit node(std::in_place_t, Args&&... args)  noexcept(std::is_nothrow_constructible_v<value_type, Args...>) : value(std::forward<Args>(args)...){}
-		};
-		static constexpr size_type traversal_stack_reserve = 16; // Typical traversal depth (balanced trees rarely exceed log2(N). Just a perf hint, does not affect correctness.
-		index_type root_ = npos;
-		size_type alive_ = 0;
-		std::vector<std::optional<node>> nodes_;
-		std::vector<index_type> free_;
-		[[no_unique_address]] Compare comp_{};
-
-		template<class V>
-		constexpr index_type make_node(V&& v){
-			if(!free_.empty()){ //can we re-use a free slot?
-				index_type idx = free_.back();
-				try{ // try construct before popping
-					nodes_[idx].emplace(std::forward<V>(v));
-					free_.pop_back();
-					++alive_;
-					return idx;
-				} catch(...){
-					// leave free_ unchanged and rethrow
-					throw;
-				}
-			}
-			// no free slots available, let's append (grow)
-			index_type idx = static_cast<index_type>(nodes_.size());
-			if(nodes_.size() == size_type(std::numeric_limits<index_type>::max())){
-				throw std::length_error("flat::bst index overflow!");
-			}
-			nodes_.emplace_back(node(std::forward<V>(v))); // may throw, but no state updated yet
-			++alive_;
-			return idx;
-		}
-
-		constexpr void tombstone(index_type idx){
-			assert(is_valid(idx) && idx < nodes_.size() && nodes_[idx].has_value());
-			nodes_[idx].reset();
-			free_.push_back(idx);
-			--alive_;
-		}
-
-		constexpr node& get(index_type idx) noexcept{
-			assert(is_valid(idx) && idx < nodes_.size() && nodes_[idx].has_value());
-			return *nodes_[idx];
-		}
-		constexpr const node& get(index_type idx) const noexcept{
-			assert(is_valid(idx) && idx < nodes_.size() && nodes_[idx].has_value());
-			return *nodes_[idx];
-		}
-		
-		// find_with_parent is a performance optimization for erase()
-		// it returns both the matching node and its parent in one traversal.
-		constexpr std::pair<index_type, index_type> find_with_parent(const value_type& key) const
-			noexcept(noexcept(std::declval<const Compare&>()(std::declval<const T&>(), std::declval<const T&>()))) 
-		{
-			index_type parent = npos;
-			index_type cur = root_;
-			while(is_valid(cur)){
-				const node& n = get(cur);
-				if(comp_(key, n.value)){
-					parent = cur;
-					cur = n.left;
-				} else if(comp_(n.value, key)){
-					parent = cur;
-					cur = n.right;
-				} else{
-					return {parent, cur}; // equal
-				}
-			}
-			return {npos, npos};
-		}
-
-		// link parent's child pointer to new child
-		constexpr void relink_child(index_type parent, index_type old_child, index_type new_child){
-			if(parent == npos){
-				root_ = new_child;
-				return;
-			}
-			node& p = get(parent);
-			if(p.left == old_child){
-				p.left = new_child;
-			} else if(p.right == old_child){
-				p.right = new_child;
-			} else{
-				assert(false && "parent does not point to old_child");
-			}
-		}
-
-		// erase at specific index, given its parent
-		constexpr void erase_at(index_type parent, index_type cur){
-			node& n = get(cur);
-			// Case 1: 0 children
-			if(!is_valid(n.left) && !is_valid(n.right)){
-				relink_child(parent, cur, npos);
-				tombstone(cur);
-				return;
-			}
-			// Case 2: 1 child
-			if(!is_valid(n.left) || !is_valid(n.right)){
-				index_type child = is_valid(n.left) ? n.left : n.right;
-				relink_child(parent, cur, child);
-				tombstone(cur);
-				return;
-			}
-			// Case 3: 2 children: replace value with inorder successor, then delete successor
-			// Find leftmost in right subtree
-			index_type succ_parent = cur;
-			index_type succ = n.right;
-			while(is_valid(left_of(succ))){
-				succ_parent = succ;
-				succ = left_of(succ);
-			}
-			n.value = std::move(value_of(succ));
-			// remove successor node (which has at most one child on the right)
-			index_type succ_right = right_of(succ);
-			relink_child(succ_parent, succ, succ_right);
-			tombstone(succ);
-		}
-
-		template<class It>
-		void build_from_sorted_unique_into_empty(It first, It last){
-			assert(empty() && "Tree must be empty to use build_from_sorted_unique_into_empty");
-			const size_type n = static_cast<size_type>(std::distance(first, last));
-			if(n == 0){ root_ = npos; return; }
-			nodes_.reserve(n);
-
-			auto build = [&](auto&& self, It lo, It hi) -> index_type{
-				if(lo == hi) return npos;
-				It mid = lo + (std::distance(lo, hi) / 2);
-				index_type me = make_node(*mid);       // can throw, but *this* is still a valid empty-or-partial tree
-				node& m = get(me);
-				m.left = self(self, lo, mid);
-				m.right = self(self, std::next(mid), hi);
-				return me;
-				};
-			root_ = build(build, first, last);
-		}
-
-		// unique-key insert helpers
-		template<class V>
-		constexpr std::pair<index_type, bool> insert_impl(V&& v){
-			if(!is_valid(root_)){
-				root_ = make_node(std::forward<V>(v));
-				return {root_, true};
-			}
-			index_type parent = npos;
-			index_type index = root_;
-			while(is_valid(index)){
-				parent = index;
-				node& n = get(index);
-				if(comp_(v, n.value)){
-					index = n.left;
-				} else if(comp_(n.value, v)){
-					index = n.right;
-				} else{ // equal - reject duplicate by default					
-					return {index, false};
-				}
-			}
-			index = make_node(std::forward<V>(v));
-			node& p = get(parent);
-			if(comp_(get(index).value, p.value)){
-				p.left = index;
-			} else{
-				p.right = index;
-			}
-			return {index, true};
-		}
-
-		template<class... Args>
-		constexpr std::pair<index_type, bool> emplace_impl(Args&&... args){
-			if(!is_valid(root_)){
-				root_ = make_node(node(std::in_place, std::forward<Args>(args)...));
-				return {root_, true};
-			}
-			// two-pass: descend with a temporary key constructed for comparisons,
-			// then construct in place at leaf. To avoid extra T, we construct once,
-			// then move into slot. That is fine for most Ts.
-			value_type temp(std::forward<Args>(args)...);
-			return insert_impl(std::move(temp));
-		}
-	};
-
-	template<class T, class Compare, class IndexT>
-	void swap(bst<T, Compare, IndexT>& a, bst<T, Compare, IndexT>& b)
-		noexcept(noexcept(a.swap(b))){
-		a.swap(b);
-	}
-} //namespace flat
+    template<class T, class Compare, class IndexT>
+    void swap(bst<T, Compare, IndexT>& a, bst<T, Compare, IndexT>& b)
+        noexcept(noexcept(a.swap(b))){
+        a.swap(b);
+    }
+}
