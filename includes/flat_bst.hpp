@@ -3,7 +3,7 @@
 // better cache locality, fewer allocations, and stable references.
 // Inspired by Jens Weller’s “Looking at binary trees in C++”:
 //	 https://meetingcpp.com/blog/items/Looking-at-binary-trees-in-Cpp.html
-// Live demo: https://compiler-explorer.com/z/rqEKxGsTT
+// Live demo: https://compiler-explorer.com/z/Pjd5ea7zj
 // Requires C++20. See demo.cpp for usage examples.
 // Ulf Benjaminsson, 2026
 
@@ -186,44 +186,38 @@ namespace flat {
         inline constexpr const_inorder_iterator begin_inorder() const{ return const_inorder_iterator(this, false); }
         inline constexpr const_inorder_iterator end_inorder()   const{ return const_inorder_iterator(this, true); }
         inline constexpr auto begin() const{ return begin_inorder(); }
-        inline constexpr auto end() const{ return end_inorder(); }
-
-        //accessors for the iterators to be able to do their work
-        //they bloat the public API a bit, but I don't have to deal with friend classes so...
-        [[nodiscard]] constexpr index_type root_index() const noexcept{
-            return (root_idx_ == npos_raw) ? npos : make_handle(root_idx_);
-        }
-
-        static constexpr bool is_valid(index_type handle) noexcept{ return handle != npos; }
+        inline constexpr auto end() const{ return end_inorder(); }    
 
         // returns true if handle is valid AND matches the current generation of the slot
         [[nodiscard]] constexpr bool is_handle_valid(index_type handle) const noexcept{
-            if(handle == npos) return false;
+            if(handle == npos){ return false; }
             index_type idx = Layout::unpack_index(handle);
             index_type gen = Layout::unpack_gen(handle);
-            if(idx >= slots_.size()) return false;
+            if(idx >= slots_.size()){ return false; }
             return (slots_[idx].generation == gen) && slots_[idx].is_alive();
         }
 
         [[nodiscard]] constexpr index_type left_of(index_type handle) const noexcept{
-            if(!is_handle_valid(handle)) return npos;
+            if(!is_handle_valid(handle)){ return npos; }
             index_type left_idx = slots_[Layout::unpack_index(handle)].left;
-            return (left_idx == npos_raw) ? npos : make_handle(left_idx);
+            if(left_idx == npos_raw){ return npos; }
+            assert(slots_[left_idx].is_alive());
+            return make_handle(left_idx);
         }
 
         [[nodiscard]] constexpr index_type right_of(index_type handle) const noexcept{
             if(!is_handle_valid(handle)) return npos;
             index_type right_idx = slots_[Layout::unpack_index(handle)].right;
-            return (right_idx == npos_raw) ? npos : make_handle(right_idx);
+            if(right_idx == npos_raw){ return npos; } 
+            assert(slots_[right_idx].is_alive());
+            return make_handle(right_idx);
         }
 
         //note: noexcept! will std::terminate on invalid handle
         [[nodiscard]] constexpr const value_type& value_of(index_type handle) const noexcept{
-            assert(is_handle_valid(handle) && "Invalid or stale bst handle");
-            if(!is_handle_valid(handle)){
-                std::terminate();
-			}
-            return slots_[Layout::unpack_index(handle)].value();
+            const value_type* ptr = get_ptr(handle);
+            if(!ptr) std::terminate();
+            return *ptr;
         }
 
         constexpr void reserve(size_type n){ slots_.reserve(n); }
@@ -243,8 +237,6 @@ namespace flat {
             swap(alive_count_, other.alive_count_);
             swap(comp_, other.comp_);
         }
-
-        constexpr void rebuild_compact(){ rebalance(); }
 
         constexpr void rebalance(){
             if(alive_count_ < 2) return;
