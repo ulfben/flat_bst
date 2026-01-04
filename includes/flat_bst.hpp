@@ -409,11 +409,33 @@ namespace flat {
                 std::destroy_at(std::launder(reinterpret_cast<T*>(storage)));
             }
 
+            template<class V>
+            void revive(V&& v){
+                assert(!is_alive());
+                construct_value(std::forward<V>(v)); // may throw
+                generation++; // odd -> even
+                left = npos_raw;
+                right = npos_raw;
+            }
+                        
+            constexpr void make_free(index_type next_free) noexcept{
+                assert(is_alive());
+                destroy_value();
+                generation++; // even -> odd
+                left = npos_raw;
+                right = next_free;
+            }
+
             constexpr T& value() noexcept{ return *std::launder(reinterpret_cast<T*>(storage)); }
             constexpr const T& value() const noexcept{ return *std::launder(reinterpret_cast<const T*>(storage)); }
 
             // RAII: ensure Slot copies/moves only the live T, and destroys when needed.
             Slot() = default;
+
+            explicit Slot(std::in_place_t, auto&&... args)
+                : generation(2), left(npos_raw), right(npos_raw){
+                std::construct_at(reinterpret_cast<T*>(storage), std::forward<decltype(args)>(args)...);
+            }
 
             Slot(const Slot& other)
                 noexcept(std::is_nothrow_copy_constructible_v<T>)
@@ -422,7 +444,6 @@ namespace flat {
                     construct_value(other.value());
                 }
             }
-
 
             Slot(Slot&& other)
                 noexcept(std::is_nothrow_move_constructible_v<T>)
@@ -478,59 +499,45 @@ namespace flat {
         size_type alive_count_ = 0;
         [[no_unique_address]] Compare comp_{};
 
+        constexpr bool free_head_is_valid() const noexcept{
+            return free_head_ == npos_raw || !slots_[free_head_].is_alive();
+        }
+
         constexpr index_type make_handle(index_type raw_idx) const noexcept{
             return Layout::pack(raw_idx, slots_[raw_idx].generation);
         }
 
         template<class V>
         index_type allocate_node(V&& v){
-            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
+            assert(free_head_is_valid());
             index_type idx;
             if(free_head_ != npos_raw){
                 idx = free_head_;
-                Slot& s = slots_[idx];
-                assert(!s.is_alive());
-                free_head_ = s.right;              
+                Slot& s = slots_[idx];                
+                free_head_ = s.right; //pop             
                 try{ 
-                    s.construct_value(std::forward<V>(v)); 
-                } catch(...){
-                    //re-push on freelist
-                    s.right = free_head_;
+                    s.revive(std::forward<V>(v));
+                } catch(...){                     
+                    s.right = free_head_; //push back (restore freelist)
                     free_head_ = idx;
                     throw;
-                }
-                s.generation++; // odd -> even, now alive
-                s.left = npos_raw;
-                s.right = npos_raw;
+                }             
             } else{
-                idx = static_cast<index_type>(slots_.size());
-                // IMPORTANT: idx == npos_raw is reserved for sentinel and cannot be allocated.
+                idx = static_cast<index_type>(slots_.size());                
                 if(idx >= npos_raw) throw std::length_error("BST index overflow");
-				slots_.emplace_back(); // generation starts at 1 (free)
-                try{ 
-                    slots_.back().construct_value(std::forward<V>(v)); 
-                    slots_.back().generation++; // free -> alive
-                } catch(...){ 
-                    slots_.pop_back(); 
-                    throw; 
-                }
+                slots_.emplace_back(std::in_place, std::forward<V>(v));                
             }
             ++alive_count_;
-            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
+            assert(free_head_is_valid());
             return idx;
         }
 
         void free_node(index_type idx){
-            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
-            Slot& s = slots_[idx];
-            assert(s.is_alive());
-            s.destroy_value();
-            s.generation++; // Even -> Odd (Free)
-            s.left = npos_raw;
-            s.right = free_head_;
+            assert(free_head_is_valid());            
+            slots_[idx].make_free(free_head_);
             free_head_ = idx;
             alive_count_--;
-            assert(free_head_ == npos_raw || !slots_[free_head_].is_alive());
+            assert(free_head_is_valid());
         }
 
         constexpr std::pair<index_type, index_type> find_internal_raw(const value_type& key) const{
