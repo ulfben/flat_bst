@@ -203,19 +203,19 @@ namespace flat {
 
 		// Key-based lookup
 		[[nodiscard]] constexpr bool contains(const value_type& key) const noexcept{
-			return find_internal_raw(key).second != npos_raw;
+			return find_path_(key).cur != npos_raw;
 		}
 
 		// Returns handle to matching node, or npos if not found.
 		[[nodiscard]] constexpr handle_type find_handle(const value_type& key) const noexcept{
-			index_type raw = find_internal_raw(key).second;
-			return (raw == npos_raw) ? npos : make_handle(raw);
+			const auto r = find_path_(key);
+			return (r.cur == npos_raw) ? npos : make_handle(r.cur);
 		}
 
 		// Convenience: pointer to value, or nullptr if not found.
 		[[nodiscard]] constexpr const value_type* find_ptr(const value_type& key) const noexcept{
-			index_type raw = find_internal_raw(key).second;
-			return (raw == npos_raw) ? nullptr : &slots_[raw].value();
+			const auto r = find_path_(key);
+			return (r.cur == npos_raw) ? nullptr : &slots_[r.cur].value();
 		}
 
 		// Ordered queries
@@ -334,9 +334,9 @@ namespace flat {
 
 		// erase by key - returns true if erased
 		constexpr bool erase(const value_type& key){
-			auto [parent, cur] = find_internal_raw(key);
-			if(cur == npos_raw) return false;
-			erase_internal(parent, cur);
+			const auto r = find_path_(key);
+			if(r.cur == npos_raw) return false;
+			erase_internal(r.parent, r.cur);
 			return true;
 		}
 
@@ -584,14 +584,6 @@ namespace flat {
 
 			// Not found: parent is insertion point (or npos_raw if tree empty)
 			return {parent, npos_raw, go_left};
-		}
-
-		constexpr std::pair<index_type, index_type> find_internal_raw(const value_type& key) const{
-			const path_result r = find_path_(key);
-			if(r.cur == npos_raw){
-				return {npos_raw, npos_raw};
-			}
-			return {r.parent, r.cur};
 		}
 
 		template<class V>
