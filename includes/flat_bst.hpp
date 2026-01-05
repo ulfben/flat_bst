@@ -537,9 +537,10 @@ namespace flat {
 					throw;
 				}
 			} else{
-				idx = static_cast<index_type>(slots_.size());
-				if(idx >= npos_raw) throw std::length_error("BST index overflow");
+				auto next = slots_.size();
+				if(next >= static_cast<size_t>(npos_raw)) throw std::length_error("BST index overflow");				
 				slots_.emplace_back(std::in_place, std::forward<V>(v));
+				idx = static_cast<index_type>(next);
 			}
 			++alive_count_;
 			assert(free_head_is_valid());
