@@ -37,7 +37,7 @@ namespace flat {
         static constexpr int gen_bits =
             (total_bits >= 64) ? 32 :
             (total_bits >= 32) ? 12 :
-            (total_bits >= 16) ? 3 : // 13-bit index => 8191 usable raw indices (one reserved)
+            (total_bits >= 16) ? 3 :
             2;
                 
         static_assert(gen_bits >= 0 && gen_bits < total_bits, "gen_bits must be in [0, digits)");
@@ -183,10 +183,8 @@ namespace flat {
         [[nodiscard]] constexpr size_type capacity() const noexcept{ return slots_.capacity(); }
         [[nodiscard]] constexpr bool empty() const noexcept{ return alive_count_ == 0; }
 
-        inline constexpr const_inorder_iterator begin_inorder() const{ return const_inorder_iterator(this, false); }
-        inline constexpr const_inorder_iterator end_inorder()   const{ return const_inorder_iterator(this, true); }
-        inline constexpr auto begin() const{ return begin_inorder(); }
-        inline constexpr auto end() const{ return end_inorder(); }    
+        inline constexpr const_inorder_iterator begin() const{ return const_inorder_iterator(this, false); }
+        inline constexpr const_inorder_iterator end()   const{ return const_inorder_iterator(this, true); }        
 
         // returns true if handle is valid AND matches the current generation of the slot
         [[nodiscard]] constexpr bool is_handle_valid(index_type handle) const noexcept{
@@ -242,7 +240,7 @@ namespace flat {
             if(alive_count_ < 2) return;
             std::vector<value_type> vals;
             vals.reserve(alive_count_);
-            inorder([&](const value_type& v){ vals.push_back(v); });
+            for_each_inorder([&](const value_type& v){ vals.push_back(v); });
             // Building from sorted unique completely replaces the storage,
             // effectively compacting and resetting generations for reused slots.
             // Note: This INVALIDATES all existing external handles.
@@ -299,7 +297,7 @@ namespace flat {
             build_from_sorted_unique(vals.begin(), vals.end());
         }
 
-        [[nodiscard]] constexpr index_type find_index(const value_type& key) const noexcept{
+        [[nodiscard]] constexpr index_type find_handle(const value_type& key) const noexcept{
             index_type raw = find_internal_raw(key).second;
             return (raw == npos_raw) ? npos : make_handle(raw);
         }
@@ -330,7 +328,7 @@ namespace flat {
 
        // traversals: inorder, preorder, postorder. Callback recieves const T&
         template<class F>
-        constexpr void inorder(F&& f) const{
+        constexpr void for_each_inorder(F&& f) const{
             std::vector<index_type> stack;
             stack.reserve(traversal_stack_reserve);
             index_type index = root_idx_;
@@ -347,7 +345,7 @@ namespace flat {
         }
 
         template<class F>
-        constexpr void preorder(F&& f) const{
+        constexpr void for_each_preorder(F&& f) const{
             if(root_idx_ == npos_raw) return;
             std::vector<index_type> stack;
             stack.reserve(traversal_stack_reserve);
@@ -363,7 +361,7 @@ namespace flat {
         }
 
         template<class F>
-        constexpr void postorder(F&& f) const{
+        constexpr void for_each_postorder(F&& f) const{
             if(root_idx_ == npos_raw) return;
             std::vector<index_type> stack1, stack2;
             stack1.reserve(traversal_stack_reserve);

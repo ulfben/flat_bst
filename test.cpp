@@ -8,21 +8,21 @@ using flat::bst;
 template <class T>
 static std::vector<T> inorder_dump(const bst<T>& t){
     std::vector<T> out;
-    t.inorder([&](const T& v){ out.push_back(v); });
+    t.for_each_inorder([&](const T& v){ out.push_back(v); });
     return out;
 }
 
 template <class T>
 static std::vector<T> preorder_dump(const bst<T>& t){
     std::vector<T> out;
-    t.preorder([&](const T& v){ out.push_back(v); });
+    t.for_each_preorder([&](const T& v){ out.push_back(v); });
     return out;
 }
 
 template <class T>
 static std::vector<T> postorder_dump(const bst<T>& t){
     std::vector<T> out;
-    t.postorder([&](const T& v){ out.push_back(v); });
+    t.for_each_postorder([&](const T& v){ out.push_back(v); });
     return out;
 }
 
@@ -117,10 +117,10 @@ TEST(FlatBst, FindAndFindIndex){
     auto* p42 = t.find(42);
     EXPECT_EQ(p42, nullptr);
 
-    auto i5 = t.find_index(5);
+    auto i5 = t.find_handle(5);
     EXPECT_NE(i5, npos);
 
-    auto i0 = t.find_index(0);
+    auto i0 = t.find_handle(0);
     EXPECT_EQ(i0, npos);
 }
 
@@ -144,7 +144,7 @@ TEST(FlatBst, InorderIteratorMatchesTraversal){
     }
 
     std::vector<int> via_iter;
-    for(auto it = t.begin_inorder(); it != t.end_inorder(); ++it){
+    for(auto it = t.begin(); it != t.end(); ++it){
         via_iter.push_back(*it);
     }
 
