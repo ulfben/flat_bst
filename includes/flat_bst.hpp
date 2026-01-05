@@ -138,13 +138,12 @@ namespace flat {
         using value_type = T;
         using size_type = std::size_t;
         using index_type = IndexT;
-
-        // Keep public API intact: npos is the max value (old behavior).
-        static constexpr index_type npos = std::numeric_limits<index_type>::max();
-
+        using handle_type = index_type;
+                
+        static constexpr handle_type npos = std::numeric_limits<index_type>::max();
         // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw,
         // so raw indices are always in [0, npos_raw).
-        static constexpr index_type npos_raw = Layout::idx_mask;
+        static constexpr handle_type npos_raw = Layout::idx_mask;
 
         bst() = default;
 
@@ -187,7 +186,7 @@ namespace flat {
         inline constexpr const_inorder_iterator end()   const{ return const_inorder_iterator(this, true); }        
 
         // returns true if handle is valid AND matches the current generation of the slot
-        [[nodiscard]] constexpr bool is_handle_valid(index_type handle) const noexcept{
+        [[nodiscard]] constexpr bool is_handle_valid(handle_type handle) const noexcept{
             if(handle == npos){ return false; }
             index_type idx = Layout::unpack_index(handle);
             index_type gen = Layout::unpack_gen(handle);
@@ -195,7 +194,7 @@ namespace flat {
             return (slots_[idx].generation == gen) && slots_[idx].is_alive();
         }
 
-        [[nodiscard]] constexpr index_type left_of(index_type handle) const noexcept{
+        [[nodiscard]] constexpr handle_type left_of(handle_type handle) const noexcept{
             if(!is_handle_valid(handle)){ return npos; }
             index_type left_idx = slots_[Layout::unpack_index(handle)].left;
             if(left_idx == npos_raw){ return npos; }
@@ -203,7 +202,7 @@ namespace flat {
             return make_handle(left_idx);
         }
 
-        [[nodiscard]] constexpr index_type right_of(index_type handle) const noexcept{
+        [[nodiscard]] constexpr handle_type right_of(handle_type handle) const noexcept{
             if(!is_handle_valid(handle)) return npos;
             index_type right_idx = slots_[Layout::unpack_index(handle)].right;
             if(right_idx == npos_raw){ return npos; } 
@@ -212,7 +211,7 @@ namespace flat {
         }
 
         //note: noexcept! will std::terminate on invalid handle
-        [[nodiscard]] constexpr const value_type& value_of(index_type handle) const noexcept{
+        [[nodiscard]] constexpr const value_type& value_of(handle_type handle) const noexcept{
             const value_type* ptr = get_ptr(handle);
             if(!ptr) std::terminate();
             return *ptr;
@@ -236,25 +235,23 @@ namespace flat {
             swap(comp_, other.comp_);
         }
 
+        // Note: This INVALIDATES all existing external handles.
         constexpr void rebalance(){
             if(alive_count_ < 2) return;
             std::vector<value_type> vals;
             vals.reserve(alive_count_);
-            for_each_inorder([&](const value_type& v){ vals.push_back(v); });
-            // Building from sorted unique completely replaces the storage,
-            // effectively compacting and resetting generations for reused slots.
-            // Note: This INVALIDATES all existing external handles.
+            for_each_inorder([&](const value_type& v){ vals.push_back(v); });            
             bst tmp(comp_);
             tmp.build_from_sorted_unique_into_empty(vals.begin(), vals.end());
             swap(tmp);
         }
 
         // insert / emplace, returns {index, inserted}
-        constexpr std::pair<index_type, bool> insert(const value_type& v){ return insert_impl(v); }
-        constexpr std::pair<index_type, bool> insert(value_type&& v){ return insert_impl(std::move(v)); }
+        constexpr std::pair<handle_type, bool> insert(const value_type& v){ return insert_impl(v); }
+        constexpr std::pair<handle_type, bool> insert(value_type&& v){ return insert_impl(std::move(v)); }
 
         template<class... Args>
-        constexpr std::pair<index_type, bool> emplace(Args&&... args){
+        constexpr std::pair<handle_type, bool> emplace(Args&&... args){
             value_type temp(std::forward<Args>(args)...);
             return insert_impl(std::move(temp));
         }
@@ -288,7 +285,7 @@ namespace flat {
             if constexpr(std::forward_iterator<It>){
                 vals.reserve(static_cast<size_type>(std::distance(first, last)));
             }
-            for(; first != last; ++first) vals.push_back(*first);
+            for(; first != last; ++first){ vals.push_back(*first); }
             std::sort(vals.begin(), vals.end(), comp_);
             vals.erase(std::unique(vals.begin(), vals.end(),
                 [&](const value_type& a, const value_type& b){
@@ -297,7 +294,7 @@ namespace flat {
             build_from_sorted_unique(vals.begin(), vals.end());
         }
 
-        [[nodiscard]] constexpr index_type find_handle(const value_type& key) const noexcept{
+        [[nodiscard]] constexpr handle_type find_handle(const value_type& key) const noexcept{
             index_type raw = find_internal_raw(key).second;
             return (raw == npos_raw) ? npos : make_handle(raw);
         }
@@ -501,7 +498,7 @@ namespace flat {
             return free_head_ == npos_raw || !slots_[free_head_].is_alive();
         }
 
-        constexpr index_type make_handle(index_type raw_idx) const noexcept{
+        constexpr handle_type make_handle(index_type raw_idx) const noexcept{
             return Layout::pack(raw_idx, slots_[raw_idx].generation);
         }
 
@@ -596,7 +593,7 @@ namespace flat {
         }
 
         template<class V>
-        constexpr std::pair<index_type, bool> insert_impl(V&& v){
+        constexpr std::pair<handle_type, bool> insert_impl(V&& v){
             if(root_idx_ == npos_raw){
                 index_type idx = allocate_node(std::forward<V>(v));
                 root_idx_ = idx;
