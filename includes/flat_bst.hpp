@@ -554,23 +554,67 @@ namespace flat {
 			alive_count_--;
 			assert(free_head_is_valid());
 		}
+		
+		struct path_result final{
+			index_type parent = npos_raw; // parent of cur if found, or insertion parent if not found
+			index_type cur = npos_raw; // found node, or npos_raw if not found
+			bool go_left = false;    // only meaningful when cur == npos_raw and parent != npos_raw
+		};
 
-		constexpr std::pair<index_type, index_type> find_internal_raw(const value_type& key) const{
+		constexpr path_result find_path_(const value_type& key) const{
 			index_type parent = npos_raw;
 			index_type cur = root_idx_;
+			bool go_left = false;
+
 			while(cur != npos_raw){
 				const Slot& s = slots_[cur];
 				if(comp_(key, s.value())){
 					parent = cur;
+					go_left = true;
 					cur = s.left;
 				} else if(comp_(s.value(), key)){
 					parent = cur;
+					go_left = false;
 					cur = s.right;
 				} else{
-					return {parent, cur};
+					// Found exact match
+					return {parent, cur, false};
 				}
 			}
-			return {npos_raw, npos_raw};
+
+			// Not found: parent is insertion point (or npos_raw if tree empty)
+			return {parent, npos_raw, go_left};
+		}
+
+		constexpr std::pair<index_type, index_type> find_internal_raw(const value_type& key) const{
+			const path_result r = find_path_(key);
+			if(r.cur == npos_raw){
+				return {npos_raw, npos_raw};
+			}
+			return {r.parent, r.cur};
+		}
+
+		template<class V>
+		constexpr std::pair<handle_type, bool> insert_impl(V&& v){
+			// Important: don't move from v during comparisons
+			const value_type& key = v;
+
+			const path_result r = find_path_(key);
+			if(r.cur != npos_raw){
+				return {make_handle(r.cur), false};
+			}
+
+			const index_type idx = allocate_node(std::forward<V>(v));
+
+			if(r.parent == npos_raw){
+				root_idx_ = idx; // empty tree case
+			} else if(r.go_left){
+				slots_[r.parent].left = idx;
+			} else{
+				slots_[r.parent].right = idx;
+			}
+
+			return {make_handle(idx), true};
 		}
 
 		constexpr void relink_child(index_type parent, index_type old_child, index_type new_child){
@@ -620,35 +664,7 @@ namespace flat {
 		}
 
 
-		template<class V>
-		constexpr std::pair<handle_type, bool> insert_impl(V&& v){
-			if(root_idx_ == npos_raw){
-				index_type idx = allocate_node(std::forward<V>(v));
-				root_idx_ = idx;
-				return {make_handle(idx), true};
-			}
-			index_type parent = npos_raw;
-			index_type cur = root_idx_;
-			bool go_left = false;
-			while(cur != npos_raw){
-				parent = cur;
-				Slot& s = slots_[cur];
-				if(comp_(v, s.value())){
-					go_left = true;
-					cur = s.left;
-				} else if(comp_(s.value(), v)){
-					go_left = false;
-					cur = s.right;
-				} else{
-					return {make_handle(cur), false};
-				}
-			}
-			index_type idx = allocate_node(std::forward<V>(v));
-			if(go_left) slots_[parent].left = idx;
-			else slots_[parent].right = idx;
-			return {make_handle(idx), true};
-		}
-
+		
 		template<class It>
 			requires std::random_access_iterator<It>
 		void build_from_sorted_unique_into_empty(It first, It last){
