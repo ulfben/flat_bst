@@ -139,11 +139,9 @@ namespace flat {
         using size_type = std::size_t;
         using index_type = IndexT;
         using handle_type = index_type;
-                
-        static constexpr handle_type npos = std::numeric_limits<index_type>::max();
-        // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw,
-        // so raw indices are always in [0, npos_raw).
-        static constexpr handle_type npos_raw = Layout::idx_mask;
+
+        static constexpr handle_type npos = std::numeric_limits<index_type>::max();        
+        static constexpr handle_type npos_raw = Layout::idx_mask; // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw, so raw indices are always in [0, npos_raw).
 
         bst() = default;
 
@@ -177,47 +175,87 @@ namespace flat {
         bst(bst&&) noexcept = default;
         bst& operator=(bst&&) noexcept = default;
 
-        [[nodiscard]] constexpr size_type size() const noexcept{ return alive_count_; }
-        [[nodiscard]] constexpr size_type holes() const noexcept{ return slots_.size() - alive_count_; }
-        [[nodiscard]] constexpr size_type capacity() const noexcept{ return slots_.capacity(); }
         [[nodiscard]] constexpr bool empty() const noexcept{ return alive_count_ == 0; }
-
+        [[nodiscard]] constexpr size_type size() const noexcept{ return alive_count_; }        
+        [[nodiscard]] constexpr size_type capacity() const noexcept{ return slots_.capacity(); }
+        constexpr void reserve(size_type n){ slots_.reserve(n); }        
         inline constexpr const_inorder_iterator begin() const{ return const_inorder_iterator(this, false); }
         inline constexpr const_inorder_iterator end()   const{ return const_inorder_iterator(this, true); }        
 
         // returns true if handle is valid AND matches the current generation of the slot
         [[nodiscard]] constexpr bool is_handle_valid(handle_type handle) const noexcept{
-            if(handle == npos){ return false; }
+            if(handle == npos) return false;
             index_type idx = Layout::unpack_index(handle);
             index_type gen = Layout::unpack_gen(handle);
-            if(idx >= slots_.size()){ return false; }
+            if(idx >= slots_.size()) return false;
             return (slots_[idx].generation == gen) && slots_[idx].is_alive();
         }
 
-        [[nodiscard]] constexpr handle_type left_of(handle_type handle) const noexcept{
-            if(!is_handle_valid(handle)){ return npos; }
-            index_type left_idx = slots_[Layout::unpack_index(handle)].left;
-            if(left_idx == npos_raw){ return npos; }
-            assert(slots_[left_idx].is_alive());
-            return make_handle(left_idx);
+        // Handle -> value
+        // Fast, non-throwing. nullptr if invalid/stale.
+        [[nodiscard]] constexpr const value_type* try_get(handle_type handle) const noexcept{
+            if(!is_handle_valid(handle)) return nullptr;
+            return &slots_[Layout::unpack_index(handle)].value();
+        }
+        
+        [[nodiscard]] const value_type& at(handle_type handle) const{
+            if(const value_type* p = try_get(handle)) return *p;
+            throw std::out_of_range("flat::bst::at - invalid/stale handle");
         }
 
-        [[nodiscard]] constexpr handle_type right_of(handle_type handle) const noexcept{
-            if(!is_handle_valid(handle)) return npos;
-            index_type right_idx = slots_[Layout::unpack_index(handle)].right;
-            if(right_idx == npos_raw){ return npos; } 
-            assert(slots_[right_idx].is_alive());
-            return make_handle(right_idx);
+        // Key-based lookup
+        [[nodiscard]] constexpr bool contains(const value_type& key) const noexcept{
+            return find_internal_raw(key).second != npos_raw;
         }
 
-        //note: noexcept! will std::terminate on invalid handle
-        [[nodiscard]] constexpr const value_type& value_of(handle_type handle) const noexcept{
-            const value_type* ptr = get_ptr(handle);
-            if(!ptr) std::terminate();
-            return *ptr;
+        // Returns handle to matching node, or npos if not found.
+        [[nodiscard]] constexpr handle_type find_handle(const value_type& key) const noexcept{
+            index_type raw = find_internal_raw(key).second;
+            return (raw == npos_raw) ? npos : make_handle(raw);
         }
 
-        constexpr void reserve(size_type n){ slots_.reserve(n); }
+        // Convenience: pointer to value, or nullptr if not found.
+        [[nodiscard]] constexpr const value_type* find_ptr(const value_type& key) const noexcept{
+            index_type raw = find_internal_raw(key).second;
+            return (raw == npos_raw) ? nullptr : &slots_[raw].value();
+        }
+
+        // Ordered queries
+        // First element for which !comp_(elem, key) (i.e. elem >= key under Compare)
+        [[nodiscard]] constexpr handle_type lower_bound_handle(const value_type& key) const noexcept{
+            index_type cur = root_idx_;
+            index_type best = npos_raw;
+            while(cur != npos_raw){
+                const Slot& s = slots_[cur];
+                if(!comp_(s.value(), key)){
+                    best = cur;
+                    cur = s.left;
+                } else{
+                    cur = s.right;
+                }
+            }
+            return (best == npos_raw) ? npos : make_handle(best);
+        }
+
+        // First element for which comp_(key, elem) (i.e. elem > key under Compare)
+        [[nodiscard]] constexpr handle_type upper_bound_handle(const value_type& key) const noexcept{
+            index_type cur = root_idx_;
+            index_type best = npos_raw;
+            while(cur != npos_raw){
+                const Slot& s = slots_[cur];
+                if(comp_(key, s.value())){
+                    best = cur;
+                    cur = s.left;
+                } else{
+                    cur = s.right;
+                }
+            }
+            return (best == npos_raw) ? npos : make_handle(best);
+        }
+
+        [[nodiscard]] constexpr std::pair<handle_type, handle_type> equal_range_handle(const value_type& key) const noexcept{
+            return {lower_bound_handle(key), upper_bound_handle(key)};
+        }
 
         constexpr void clear() noexcept{
             slots_.clear();
@@ -236,7 +274,7 @@ namespace flat {
         }
 
         // Note: This INVALIDATES all existing external handles.
-        constexpr void rebalance(){
+        constexpr void rebuild_balanced(){
             if(alive_count_ < 2) return;
             std::vector<value_type> vals;
             vals.reserve(alive_count_);
@@ -260,7 +298,7 @@ namespace flat {
         size_type insert(It first, It last){
             if constexpr(std::forward_iterator<It>){
                 auto n = static_cast<size_type>(std::distance(first, last));
-                if(n) slots_.reserve(slots_.size() + n);
+                if(n) reserve(size() + n);
             }
             size_type inserted = 0;
             for(; first != last; ++first){
@@ -293,27 +331,7 @@ namespace flat {
                 }), vals.end());
             build_from_sorted_unique(vals.begin(), vals.end());
         }
-
-        [[nodiscard]] constexpr handle_type find_handle(const value_type& key) const noexcept{
-            index_type raw = find_internal_raw(key).second;
-            return (raw == npos_raw) ? npos : make_handle(raw);
-        }
-
-        [[nodiscard]] constexpr bool contains(const value_type& key) const noexcept{
-            return find_internal_raw(key).second != npos_raw;
-        }
-
-        // returns pointer to value or nullptr
-        [[nodiscard]] constexpr const value_type* find(const value_type& key) const noexcept{
-            index_type raw = find_internal_raw(key).second;
-            if(raw == npos_raw) return nullptr;
-            return &slots_[raw].value();
-        }
-
-        [[nodiscard]] constexpr const value_type* get_ptr(index_type handle) const noexcept{
-            if(!is_handle_valid(handle)) return nullptr;
-            return &slots_[Layout::unpack_index(handle)].value();
-        }
+             
 
         // erase by key - returns true if erased
         constexpr bool erase(const value_type& key){

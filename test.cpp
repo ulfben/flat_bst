@@ -110,11 +110,11 @@ TEST(FlatBst, FindAndFindIndex){
 
     for(int v : {4, 2, 6, 1, 3, 5, 7}) (void)t.insert(v);
 
-    auto* p3 = t.find(3);
+    auto* p3 = t.find_ptr(3);
     ASSERT_NE(p3, nullptr);
     EXPECT_EQ(*p3, 3);
 
-    auto* p42 = t.find(42);
+    auto* p42 = t.find_ptr(42);
     EXPECT_EQ(p42, nullptr);
 
     auto i5 = t.find_handle(5);
@@ -248,7 +248,7 @@ TEST(FlatBst, RebalanceChangesShapePreservesOrder){
 
     auto before_size = t.size();
 
-    t.rebalance();
+    t.rebuild_balanced();
 
     EXPECT_EQ(t.size(), before_size);
     expect_equal_vec(inorder_dump(t), std::vector<int>({1, 2, 3, 4, 5, 6, 7}));
