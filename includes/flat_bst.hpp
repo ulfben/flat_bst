@@ -455,10 +455,8 @@ namespace flat {
 				noexcept(std::is_nothrow_move_constructible_v<T>)
 				: generation(other.generation), left(other.left), right(other.right){
 				if(other.is_alive()){
-					construct_value(std::move(other.value()));
-					other.destroy_value();
-					other.generation++; // make 'other' free (odd), preserving its free-list link fields as copied above
-				}
+					construct_value(std::move(other.value())); //note: we leave other alive, with a moved-from value.		
+				}				
 			}
 
 			friend void swap(Slot& a, Slot& b)
