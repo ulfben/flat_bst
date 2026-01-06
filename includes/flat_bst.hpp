@@ -58,6 +58,7 @@ namespace flat {
 	template<class T, class Compare = std::less<T>, class IndexT = uint32_t>
 	class bst final{
 		using Layout = index_layout<IndexT>;
+		using index_type = IndexT;
 
 	public: //let's define an iterator		
 		class inorder_iter final{
@@ -66,10 +67,10 @@ namespace flat {
 			// iterators use raw indices internally for performance, not handles
 			const tree_t* tree_ = nullptr;
 			std::vector<IndexT> stack_;
-			IndexT cur_raw_ = tree_t::npos_raw;
+			IndexT cur_raw_ = tree_t::null_idx;
 
 			constexpr void push_left_(IndexT i){
-				while(i != tree_t::npos_raw){
+				while(i != tree_t::null_idx){
 					stack_.push_back(i);
 					i = tree_->slots_[i].left;
 				}
@@ -84,29 +85,32 @@ namespace flat {
 
 			constexpr inorder_iter() = default;
 			explicit constexpr inorder_iter(const tree_t* t, bool end) : tree_(t){
-				if(!t || end || t->empty()){ cur_raw_ = tree_t::npos_raw; return; }
+				if(!t || end || t->empty()){ cur_raw_ = tree_t::null_idx; return; }
 				stack_.reserve(traversal_stack_reserve);
 				push_left_(t->root_idx_);
 				if(!stack_.empty()){
 					cur_raw_ = stack_.back();
 					stack_.pop_back();
 				} else{
-					cur_raw_ = tree_t::npos_raw;
+					cur_raw_ = tree_t::null_idx;
 				}
 			}
 
 			constexpr reference operator*() const noexcept{ return tree_->slots_[cur_raw_].value(); }
-			constexpr pointer   operator->() const noexcept{ return &tree_->slots_[cur_raw_].value(); }		
-
+			constexpr pointer   operator->() const noexcept{ return &tree_->slots_[cur_raw_].value(); }	
+			constexpr index_type handle() const noexcept{
+				if(cur_raw_ == tree_t::null_idx) return tree_t::npos;
+				return tree_->make_handle(cur_raw_);
+			}
 			constexpr inorder_iter& operator++(){
-				if(cur_raw_ == tree_t::npos_raw) return *this;							
+				if(cur_raw_ == tree_t::null_idx) return *this;							
 				IndexT right = tree_->slots_[cur_raw_].right;
-				if(right != tree_t::npos_raw){
+				if(right != tree_t::null_idx){
 					push_left_(right);
 				}
 
 				if(stack_.empty()){
-					cur_raw_ = tree_t::npos_raw;
+					cur_raw_ = tree_t::null_idx;
 				} else{
 					cur_raw_ = stack_.back();
 					stack_.pop_back();
@@ -130,8 +134,7 @@ namespace flat {
 	public:
 		using const_inorder_iterator = inorder_iter;
 		using value_type = T;
-		using size_type = std::size_t;
-		using index_type = IndexT;
+		using size_type = std::size_t;		
 		using handle_type = index_type;
 		static constexpr handle_type npos = std::numeric_limits<index_type>::max();		
 
@@ -182,35 +185,43 @@ namespace flat {
 			if(!is_handle_valid(handle)) return nullptr;
 			return &slots_[Layout::unpack_index(handle)].value();
 		}
+		[[nodiscard]] value_type* try_get(handle_type handle) noexcept{
+			if(!is_handle_valid(handle)) return nullptr;
+			return &slots_[Layout::unpack_index(handle)].value();
+		}
 
 		[[nodiscard]] const value_type& at(handle_type handle) const{
 			if(const value_type* p = try_get(handle)) return *p;
 			throw std::out_of_range("flat::bst::at - invalid/stale handle");
 		}
+		[[nodiscard]] value_type& at(handle_type handle) {
+			if(value_type* p = try_get(handle)) return *p;
+			throw std::out_of_range("flat::bst::at - invalid/stale handle");
+		}
 
 		// Key-based lookup
 		[[nodiscard]] constexpr bool contains(const value_type& key) const noexcept{
-			return find_path_(key).cur != npos_raw;
+			return find_path_(key).cur != null_idx;
 		}
 
 		// Returns handle to matching node, or npos if not found.
 		[[nodiscard]] constexpr handle_type find_handle(const value_type& key) const noexcept{
 			const auto r = find_path_(key);
-			return (r.cur == npos_raw) ? npos : make_handle(r.cur);
+			return (r.cur == null_idx) ? npos : make_handle(r.cur);
 		}
 
 		// Convenience: pointer to value, or nullptr if not found.
 		[[nodiscard]] constexpr const value_type* find_ptr(const value_type& key) const noexcept{
 			const auto r = find_path_(key);
-			return (r.cur == npos_raw) ? nullptr : &slots_[r.cur].value();
+			return (r.cur == null_idx) ? nullptr : &slots_[r.cur].value();
 		}
 
 		// Ordered queries
 		// First element for which !comp_(elem, key) (i.e. elem >= key under Compare)
 		[[nodiscard]] constexpr handle_type lower_bound_handle(const value_type& key) const noexcept{
 			index_type cur = root_idx_;
-			index_type best = npos_raw;
-			while(cur != npos_raw){
+			index_type best = null_idx;
+			while(cur != null_idx){
 				const Slot& s = slots_[cur];
 				if(!comp_(s.value(), key)){
 					best = cur;
@@ -219,14 +230,14 @@ namespace flat {
 					cur = s.right;
 				}
 			}
-			return (best == npos_raw) ? npos : make_handle(best);
+			return (best == null_idx) ? npos : make_handle(best);
 		}
 
 		// First element for which comp_(key, elem) (i.e. elem > key under Compare)
 		[[nodiscard]] constexpr handle_type upper_bound_handle(const value_type& key) const noexcept{
 			index_type cur = root_idx_;
-			index_type best = npos_raw;
-			while(cur != npos_raw){
+			index_type best = null_idx;
+			while(cur != null_idx){
 				const Slot& s = slots_[cur];
 				if(comp_(key, s.value())){
 					best = cur;
@@ -235,7 +246,7 @@ namespace flat {
 					cur = s.right;
 				}
 			}
-			return (best == npos_raw) ? npos : make_handle(best);
+			return (best == null_idx) ? npos : make_handle(best);
 		}
 
 		[[nodiscard]] constexpr std::pair<handle_type, handle_type> equal_range_handle(const value_type& key) const noexcept{
@@ -244,8 +255,8 @@ namespace flat {
 
 		constexpr void clear() noexcept{
 			slots_.clear();
-			root_idx_ = npos_raw;
-			free_head_ = npos_raw;
+			root_idx_ = null_idx;
+			free_head_ = null_idx;
 			alive_count_ = 0;
 		}
 
@@ -321,7 +332,7 @@ namespace flat {
 		// erase by key - returns true if erased
 		constexpr bool erase(const value_type& key){
 			const auto r = find_path_(key);
-			if(r.cur == npos_raw) return false;
+			if(r.cur == null_idx) return false;
 			erase_internal(r.parent, r.cur);
 			return true;
 		}
@@ -332,8 +343,8 @@ namespace flat {
 			std::vector<index_type> stack;
 			stack.reserve(traversal_stack_reserve);
 			index_type index = root_idx_;
-			while(index != npos_raw || !stack.empty()){
-				while(index != npos_raw){
+			while(index != null_idx || !stack.empty()){
+				while(index != null_idx){
 					stack.push_back(index);
 					index = slots_[index].left;
 				}
@@ -346,7 +357,7 @@ namespace flat {
 
 		template<class F>
 		constexpr void for_each_preorder(F&& f) const{
-			if(root_idx_ == npos_raw) return;
+			if(root_idx_ == null_idx) return;
 			std::vector<index_type> stack;
 			stack.reserve(traversal_stack_reserve);
 			stack.push_back(root_idx_);
@@ -355,14 +366,14 @@ namespace flat {
 				stack.pop_back();
 				const Slot& n = slots_[index];
 				f(n.value());
-				if(n.right != npos_raw) stack.push_back(n.right);
-				if(n.left != npos_raw) stack.push_back(n.left);
+				if(n.right != null_idx) stack.push_back(n.right);
+				if(n.left != null_idx) stack.push_back(n.left);
 			}
 		}
 
 		template<class F>
 		constexpr void for_each_postorder(F&& f) const{
-			if(root_idx_ == npos_raw) return;
+			if(root_idx_ == null_idx) return;
 			std::vector<index_type> stack1, stack2;
 			stack1.reserve(traversal_stack_reserve);
 			stack2.reserve(traversal_stack_reserve);
@@ -372,8 +383,8 @@ namespace flat {
 				stack1.pop_back();
 				stack2.push_back(index);
 				const Slot& n = slots_[index];
-				if(n.left != npos_raw) stack1.push_back(n.left);
-				if(n.right != npos_raw) stack1.push_back(n.right);
+				if(n.left != null_idx) stack1.push_back(n.left);
+				if(n.right != null_idx) stack1.push_back(n.right);
 			}
 			while(!stack2.empty()){
 				f(slots_[stack2.back()].value());
@@ -386,8 +397,8 @@ namespace flat {
 		struct Slot final{
 			// Generation logic: Even = Alive, Odd = Free.
 			index_type generation = Layout::wrap_gen(1);
-			index_type left = npos_raw;
-			index_type right = npos_raw; // Acts as next_free when dead
+			index_type left = null_idx;
+			index_type right = null_idx; // Acts as next_free when dead
 
 			alignas(T) std::byte storage[sizeof(T)];
 
@@ -409,15 +420,15 @@ namespace flat {
 				assert(!is_alive());
 				construct_value(std::forward<V>(v)); // may throw
 				bump_generation(); // odd -> even
-				left = npos_raw;
-				right = npos_raw;
+				left = null_idx;
+				right = null_idx;
 			}
 
 			constexpr void make_free(index_type next_free) noexcept{
 				assert(is_alive());
 				destroy_value();
 				bump_generation();  // even -> odd
-				left = npos_raw;
+				left = null_idx;
 				right = next_free;
 			}
 
@@ -428,7 +439,7 @@ namespace flat {
 			Slot() = default;
 
 			explicit Slot(std::in_place_t, auto&&... args)
-				: generation(2), left(npos_raw), right(npos_raw){
+				: generation(2), left(null_idx), right(null_idx){
 				std::construct_at(reinterpret_cast<T*>(storage), std::forward<decltype(args)>(args)...);
 			}
 
@@ -488,15 +499,15 @@ namespace flat {
 		};
 
 		static constexpr size_type traversal_stack_reserve = 16; // Typical traversal depth (balanced trees rarely exceed log2(N). Just a perf hint, does not affect correctness.		
-		static constexpr handle_type npos_raw = Layout::idx_mask; // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw, so raw indices are always in [0, npos_raw).
+		static constexpr handle_type null_idx = Layout::idx_mask; // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw, so raw indices are always in [0, npos_raw).
 		std::vector<Slot> slots_;
-		index_type root_idx_ = npos_raw;
-		index_type free_head_ = npos_raw;
+		index_type root_idx_ = null_idx;
+		index_type free_head_ = null_idx;
 		size_type alive_count_ = 0;
 		[[no_unique_address]] Compare comp_{};
 
 		constexpr bool free_head_is_valid() const noexcept{
-			return free_head_ == npos_raw || !slots_[free_head_].is_alive();
+			return free_head_ == null_idx || !slots_[free_head_].is_alive();
 		}
 
 		constexpr handle_type make_handle(index_type raw_idx) const noexcept{
@@ -507,7 +518,7 @@ namespace flat {
 		index_type allocate_node(V&& v){
 			assert(free_head_is_valid());
 			index_type idx;
-			if(free_head_ != npos_raw){
+			if(free_head_ != null_idx){
 				idx = free_head_;
 				Slot& s = slots_[idx];
 				free_head_ = s.right; //pop             
@@ -520,7 +531,7 @@ namespace flat {
 				}
 			} else{
 				auto next = slots_.size();
-				if(next >= static_cast<size_t>(npos_raw)) throw std::length_error("BST index overflow");				
+				if(next >= static_cast<size_t>(null_idx)) throw std::length_error("BST index overflow");				
 				slots_.emplace_back(std::in_place, std::forward<V>(v));
 				idx = static_cast<index_type>(next);
 			}
@@ -538,17 +549,17 @@ namespace flat {
 		}
 		
 		struct path_result final{
-			index_type parent = npos_raw; // parent of cur if found, or insertion parent if not found
-			index_type cur = npos_raw; // found node, or npos_raw if not found
+			index_type parent = null_idx; // parent of cur if found, or insertion parent if not found
+			index_type cur = null_idx; // found node, or npos_raw if not found
 			bool go_left = false;    // only meaningful when cur == npos_raw and parent != npos_raw
 		};
 
 		constexpr path_result find_path_(const value_type& key) const{
-			index_type parent = npos_raw;
+			index_type parent = null_idx;
 			index_type cur = root_idx_;
 			bool go_left = false;
 
-			while(cur != npos_raw){
+			while(cur != null_idx){
 				const Slot& s = slots_[cur];
 				if(comp_(key, s.value())){
 					parent = cur;
@@ -565,7 +576,7 @@ namespace flat {
 			}
 
 			// Not found: parent is insertion point (or npos_raw if tree empty)
-			return {parent, npos_raw, go_left};
+			return {parent, null_idx, go_left};
 		}
 
 		template<class V>
@@ -574,13 +585,13 @@ namespace flat {
 			const value_type& key = v;
 
 			const path_result r = find_path_(key);
-			if(r.cur != npos_raw){
+			if(r.cur != null_idx){
 				return {make_handle(r.cur), false};
 			}
 
 			const index_type idx = allocate_node(std::forward<V>(v));
 
-			if(r.parent == npos_raw){
+			if(r.parent == null_idx){
 				root_idx_ = idx; // empty tree case
 			} else if(r.go_left){
 				slots_[r.parent].left = idx;
@@ -592,7 +603,7 @@ namespace flat {
 		}
 
 		constexpr void relink_child(index_type parent, index_type old_child, index_type new_child){
-			if(parent == npos_raw){
+			if(parent == null_idx){
 				root_idx_ = new_child;
 				return;
 			}
@@ -609,12 +620,12 @@ namespace flat {
 
 		constexpr void erase_internal(index_type parent_z, index_type z) noexcept{
 			auto& Z = slots_[z];
-			if(Z.left == npos_raw){
+			if(Z.left == null_idx){
 				relink_child(parent_z, z, Z.right);
 				free_node(z);
 				return;
 			}
-			if(Z.right == npos_raw){
+			if(Z.right == null_idx){
 				relink_child(parent_z, z, Z.left);
 				free_node(z);
 				return;
@@ -622,7 +633,7 @@ namespace flat {
 			// find successor y = min(Z.right)
 			index_type parent_y = z;
 			index_type y = Z.right;
-			while(slots_[y].left != npos_raw){
+			while(slots_[y].left != null_idx){
 				parent_y = y;
 				y = slots_[y].left;
 			}
@@ -643,11 +654,11 @@ namespace flat {
 			requires std::random_access_iterator<It>
 		void build_from_sorted_unique_into_empty(It first, It last){
 			const size_type n = static_cast<size_type>(std::distance(first, last));
-			if(n == 0){ root_idx_ = npos_raw; return; }
+			if(n == 0){ root_idx_ = null_idx; return; }
 			slots_.reserve(n);
 
 			auto build = [&](auto&& self, It lo, It hi) -> index_type{
-				if(lo == hi) return npos_raw;
+				if(lo == hi) return null_idx;
 				It mid = lo + (std::distance(lo, hi) / 2);
 				// allocate_node will just append since we started empty
 				index_type me = allocate_node(*mid);
