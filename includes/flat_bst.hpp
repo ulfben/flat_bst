@@ -318,7 +318,6 @@ namespace flat {
 			build_from_sorted_unique(vals.begin(), vals.end());
 		}
 
-
 		// erase by key - returns true if erased
 		constexpr bool erase(const value_type& key){
 			const auto r = find_path_(key);
