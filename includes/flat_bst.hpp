@@ -23,7 +23,6 @@
 #include <vector>
 
 namespace flat {
-
 	// Configuration traits for packing Index + Generation into IndexT
 	// Default: 32-bit IndexT -> 20 bits index (1M items), 12 bits generation
 	template <typename IndexT>
@@ -52,100 +51,89 @@ namespace flat {
 		static constexpr IndexT wrap_gen(IndexT g) noexcept{
 			if constexpr(gen_bits == 0){ return IndexT(0); } else{ return g & gen_value_mask; }//ensure the stored generation is always in-range
 		}
-	};
-
-	// forward declare the class template so the iterator can name it
-	template<class T, class Compare = std::less<T>, class IndexT = uint32_t>
-	class bst;
+	};	
 };
 
-//namespace for the iterator implementation
-namespace flat::detail {
-	template<class T, class Compare, class IndexT>
-	class inorder_iter final{
-		using tree_t = bst<T, Compare, IndexT>;
-		static constexpr size_t traversal_stack_reserve = 16;
-		// iterators use raw indices internally for performance, not handles
-		const tree_t* tree_ = nullptr;
-		std::vector<IndexT> stack_;
-		IndexT cur_raw_ = tree_t::npos_raw;
-
-		constexpr void push_left_(IndexT i){
-			while(i != tree_t::npos_raw){
-				stack_.push_back(i);
-				i = tree_->internal_left(i);
-			}
-		}
-
-	public:
-		using value_type = const T;
-		using reference = const T&;
-		using pointer = const T*;
-		using difference_type = std::ptrdiff_t;
-		using iterator_category = std::forward_iterator_tag;
-
-		constexpr inorder_iter() = default;
-		explicit constexpr inorder_iter(const tree_t* t, bool end) : tree_(t){
-			if(!t || end || t->empty()){ cur_raw_ = tree_t::npos_raw; return; }
-			stack_.reserve(traversal_stack_reserve);
-			push_left_(t->internal_root());
-			if(!stack_.empty()){
-				cur_raw_ = stack_.back();
-				stack_.pop_back();
-			} else{
-				cur_raw_ = tree_t::npos_raw;
-			}
-		}
-
-		constexpr reference operator*() const noexcept{ return tree_->internal_value(cur_raw_); }
-		constexpr pointer   operator->() const noexcept{ return &tree_->internal_value(cur_raw_); }
-
-		constexpr inorder_iter& operator++(){
-			if(cur_raw_ == tree_t::npos_raw) return *this;
-
-			IndexT right = tree_->internal_right(cur_raw_);
-			if(right != tree_t::npos_raw){
-				push_left_(right);
-			}
-
-			if(stack_.empty()){
-				cur_raw_ = tree_t::npos_raw;
-			} else{
-				cur_raw_ = stack_.back();
-				stack_.pop_back();
-			}
-			return *this;
-		}
-
-		constexpr inorder_iter operator++(int){
-			auto tmp = *this;
-			++(*this);
-			return tmp;
-		}
-
-		friend constexpr bool operator==(const inorder_iter& a, const inorder_iter& b) noexcept{
-			return a.tree_ == b.tree_ && a.cur_raw_ == b.cur_raw_;
-		}
-		friend constexpr bool operator!=(const inorder_iter& a, const inorder_iter& b) noexcept{
-			return !(a == b);
-		}
-	};
-}  // namespace flat::detail
-
 namespace flat {
-
-	template<class T, class Compare, class IndexT>
+	template<class T, class Compare = std::less<T>, class IndexT = uint32_t>
 	class bst final{
 		using Layout = index_layout<IndexT>;
+
+	public: //let's define an iterator		
+		class inorder_iter final{
+			using tree_t = bst;
+			static constexpr size_t traversal_stack_reserve = 16;
+			// iterators use raw indices internally for performance, not handles
+			const tree_t* tree_ = nullptr;
+			std::vector<IndexT> stack_;
+			IndexT cur_raw_ = tree_t::npos_raw;
+
+			constexpr void push_left_(IndexT i){
+				while(i != tree_t::npos_raw){
+					stack_.push_back(i);
+					i = tree_->slots_[i].left;
+				}
+			}	
+
+		public:
+			using value_type = const T;
+			using reference = const T&;
+			using pointer = const T*;
+			using difference_type = std::ptrdiff_t;
+			using iterator_category = std::forward_iterator_tag;
+
+			constexpr inorder_iter() = default;
+			explicit constexpr inorder_iter(const tree_t* t, bool end) : tree_(t){
+				if(!t || end || t->empty()){ cur_raw_ = tree_t::npos_raw; return; }
+				stack_.reserve(traversal_stack_reserve);
+				push_left_(t->root_idx_);
+				if(!stack_.empty()){
+					cur_raw_ = stack_.back();
+					stack_.pop_back();
+				} else{
+					cur_raw_ = tree_t::npos_raw;
+				}
+			}
+
+			constexpr reference operator*() const noexcept{ return tree_->slots_[cur_raw_].value(); }
+			constexpr pointer   operator->() const noexcept{ return &tree_->slots_[cur_raw_].value(); }		
+
+			constexpr inorder_iter& operator++(){
+				if(cur_raw_ == tree_t::npos_raw) return *this;							
+				IndexT right = tree_->slots_[cur_raw_].right;
+				if(right != tree_t::npos_raw){
+					push_left_(right);
+				}
+
+				if(stack_.empty()){
+					cur_raw_ = tree_t::npos_raw;
+				} else{
+					cur_raw_ = stack_.back();
+					stack_.pop_back();
+				}
+				return *this;
+			}
+
+			constexpr inorder_iter operator++(int){
+				auto tmp = *this;
+				++(*this);
+				return tmp;
+			}
+
+			friend constexpr bool operator==(const inorder_iter& a, const inorder_iter& b) noexcept{
+				return a.tree_ == b.tree_ && a.cur_raw_ == b.cur_raw_;
+			}
+			friend constexpr bool operator!=(const inorder_iter& a, const inorder_iter& b) noexcept{
+				return !(a == b);
+			}
+		};
 	public:
-		using const_inorder_iterator = flat::detail::inorder_iter<T, Compare, IndexT>;
+		using const_inorder_iterator = inorder_iter;
 		using value_type = T;
 		using size_type = std::size_t;
 		using index_type = IndexT;
 		using handle_type = index_type;
-
-		static constexpr handle_type npos = std::numeric_limits<index_type>::max();
-		static constexpr handle_type npos_raw = Layout::idx_mask; // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw, so raw indices are always in [0, npos_raw).
+		static constexpr handle_type npos = std::numeric_limits<index_type>::max();		
 
 		bst() = default;
 
@@ -170,8 +158,7 @@ namespace flat {
 			build_from_range(first, last);
 		}
 
-		bst(std::initializer_list<value_type> values, Compare cmp = Compare{}) : bst(values.begin(), values.end(), cmp){}
-			
+		bst(std::initializer_list<value_type> values, Compare cmp = Compare{}) : bst(values.begin(), values.end(), cmp){}			
 
 		[[nodiscard]] constexpr bool empty() const noexcept{ return alive_count_ == 0; }
 		[[nodiscard]] constexpr size_type size() const noexcept{ return alive_count_; }
@@ -395,13 +382,8 @@ namespace flat {
 			}
 		}
 
-		// more access for iterators
-		constexpr index_type internal_root() const{ return root_idx_; }
-		constexpr index_type internal_left(index_type raw) const{ return slots_[raw].left; }
-		constexpr index_type internal_right(index_type raw) const{ return slots_[raw].right; }
-		constexpr const T& internal_value(index_type raw) const{ return slots_[raw].value(); }
+	private:	
 
-	private:
 		struct Slot final{
 			// Generation logic: Even = Alive, Odd = Free.
 			index_type generation = Layout::wrap_gen(1);
@@ -506,7 +488,8 @@ namespace flat {
 			}
 		};
 
-		static constexpr size_type traversal_stack_reserve = 16; // Typical traversal depth (balanced trees rarely exceed log2(N). Just a perf hint, does not affect correctness.
+		static constexpr size_type traversal_stack_reserve = 16; // Typical traversal depth (balanced trees rarely exceed log2(N). Just a perf hint, does not affect correctness.		
+		static constexpr handle_type npos_raw = Layout::idx_mask; // Internal raw-index sentinel: reserve the all-ones "index field" value for npos_raw, so raw indices are always in [0, npos_raw).
 		std::vector<Slot> slots_;
 		index_type root_idx_ = npos_raw;
 		index_type free_head_ = npos_raw;
